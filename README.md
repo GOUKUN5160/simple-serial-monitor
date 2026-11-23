@@ -1,4 +1,4 @@
-# Simple Serial Monitor (`ssm`)
+# Simple Serial Monitor
 
 **English** | [日本語](README.ja.md)
 
@@ -22,7 +22,7 @@ Designed to be fast, minimal, and truly portable — no Electron, no WebView2, n
 - **Multi-Port Simultaneous Monitoring (Split Grid + Multi-Window)**
   - Switch between **1-pane**, **2-pane (horizontal / vertical)**, and **4-pane (2×2)** layouts in one click.
   - Drag the borders between split panes to resize them freely; click the layout button again to reset to equal sizes.
-  - Open additional multi-pane windows (`+ 別ウィンドウ`) or pop out a dedicated single-COM-port window (`別窓`).
+  - Open additional multi-pane windows (`+ New Window`) or pop out a dedicated single-COM-port window (`Pop`).
 - **Automatic COM Port Enumeration & Hardware Names**
   - Detects USB hot-plugging automatically and identifies common hardware (ESP32, Raspberry Pi Pico/RP2xxx, Arduino, CP210x, CH340/CH341/CH9102, FTDI, STM32 ST-LINK, J-Link, etc.).
   - Configurable new-device notifications: **Off / In-App Popup / Windows Notification / Both**.
