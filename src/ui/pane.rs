@@ -1,3 +1,4 @@
+use crate::i18n::{lang, tr, Lang};
 use crate::manager::MonitorManager;
 use crate::serial::PortSession;
 use crate::types::{
@@ -5,21 +6,21 @@ use crate::types::{
 };
 use crate::ui::logview::{
     create_logview, logview_adjust_zoom, logview_append_entries, logview_clear,
-    logview_reset_zoom, logview_set_auto_scroll, logview_set_display_mode, logview_set_dpi,
-    logview_set_show_timestamps, logview_set_word_wrap, WM_LOGVIEW_AUTOSCROLL_CHANGED,
-    WM_LOGVIEW_ZOOM_CHANGED,
+    logview_reset_zoom, logview_set_auto_scroll, logview_set_dark_mode, logview_set_display_mode,
+    logview_set_dpi, logview_set_show_timestamps, logview_set_word_wrap,
+    WM_LOGVIEW_AUTOSCROLL_CHANGED, WM_LOGVIEW_ZOOM_CHANGED,
 };
 use crate::ui::tooltip::{add_combo_tooltip, add_tooltip, create_tooltip_window};
 use crate::ui::{
-    dpi_scale, get_window_text, set_window_text, to_wide, UiTheme, COLOR_STATUS_CONNECTED,
-    COLOR_STATUS_DETECTING, COLOR_STATUS_DISCONNECTED, COLOR_STATUS_FG, COLOR_STATUS_OCCUPIED,
-    COLOR_STATUS_RELEASED,
+    apply_ctrl_dark_mode, dpi_scale, get_window_text, set_window_text, to_wide, CtrlThemeKind,
+    UiTheme, COLOR_STATUS_CONNECTED, COLOR_STATUS_DETECTING, COLOR_STATUS_DISCONNECTED,
+    COLOR_STATUS_FG, COLOR_STATUS_OCCUPIED, COLOR_STATUS_RELEASED,
 };
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    InvalidateRect, SetBkColor, SetTextColor, COLOR_BTNFACE, HDC, HFONT,
+    FillRect, InvalidateRect, SetBkColor, SetTextColor, COLOR_BTNFACE, HDC, HFONT,
 };
 use windows_sys::Win32::UI::Controls::EM_SETSEL;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -34,9 +35,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CBN_EDITCHANGE, CBN_SELCHANGE, CBS_DROPDOWN, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_DELETESTRING,
     CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_INSERTSTRING, CB_RESETCONTENT, CB_SETCURSEL,
     CREATESTRUCTW, CW_USEDEFAULT, ES_AUTOHSCROLL, GWLP_USERDATA, SW_HIDE, SW_SHOW, WM_APP, WM_CHAR,
-    WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY, WM_KEYDOWN, WM_NCDESTROY, WM_SETFONT,
-    WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPSIBLINGS, WS_TABSTOP, WS_VISIBLE,
-    WS_VSCROLL,
+    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC,
+    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_NCDESTROY, WM_SETFONT, WM_SIZE, WM_TIMER,
+    WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPSIBLINGS, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 const SS_CENTERIMAGE: u32 = 0x0200;
@@ -76,7 +77,6 @@ const DATABIT_ITEMS: &[&str] = &["8bit", "7bit", "6bit", "5bit"];
 const PARITY_ITEMS: &[&str] = &["N", "E", "O", "M", "S"];
 const STOPBIT_ITEMS: &[&str] = &["1", "1.5", "2"];
 const EOL_FIXED_ITEMS: &[&str] = &["CRLF", "LF", "CR", "None"];
-const DISPLAY_ITEMS: &[&str] = &["テキスト", "HEX", "BIN"];
 
 struct PaneCreateParams {
     manager: Arc<MonitorManager>,
@@ -87,6 +87,7 @@ struct PaneCreateParams {
 
 pub struct PaneState {
     hwnd: HWND,
+    hinst: HINSTANCE,
     manager: Arc<MonitorManager>,
     theme: Arc<UiTheme>,
     dedicated: bool,
@@ -204,6 +205,13 @@ pub unsafe fn pane_apply_theme(hwnd: HWND, theme: Arc<UiTheme>) {
     }
 }
 
+pub unsafe fn pane_apply_language(hwnd: HWND) {
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PaneState;
+    if !ptr.is_null() {
+        (*ptr).apply_language();
+    }
+}
+
 unsafe extern "system" fn pane_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -274,6 +282,25 @@ unsafe extern "system" fn pane_wnd_proc(
             }
             0
         }
+        WM_ERASEBKGND => {
+            let hdc = wparam as HDC;
+            let mut rc: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rc);
+            FillRect(hdc, &rc, state.theme.brush_bg);
+            1
+        }
+        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+            let hdc = wparam as HDC;
+            SetTextColor(hdc, state.theme.col_fg);
+            SetBkColor(hdc, state.theme.col_edit_bg);
+            state.theme.brush_edit_bg as LRESULT
+        }
+        WM_CTLCOLORBTN => {
+            let hdc = wparam as HDC;
+            SetTextColor(hdc, state.theme.col_fg);
+            SetBkColor(hdc, state.theme.col_bg);
+            state.theme.brush_bg as LRESULT
+        }
         WM_CTLCOLORSTATIC => {
             let hdc = wparam as HDC;
             let ctrl = lparam as HWND;
@@ -300,7 +327,9 @@ unsafe extern "system" fn pane_wnd_proc(
                 SetBkColor(hdc, bg);
                 return brush as LRESULT;
             }
-            DefWindowProcW(hwnd, msg, wparam, lparam)
+            SetTextColor(hdc, state.theme.col_fg);
+            SetBkColor(hdc, state.theme.col_bg);
+            state.theme.brush_bg as LRESULT
         }
         WM_DESTROY => {
             KillTimer(hwnd, TIMER_POLL_ID);
@@ -569,123 +598,19 @@ impl PaneState {
         populate_combo(cmb_parity, PARITY_ITEMS);
         populate_combo(cmb_stopbits, STOPBIT_ITEMS);
 
-        let init_auto_eol = "Auto (待機)".to_string();
+        let init_auto_eol = tr("Auto (wait)", "Auto (待機)").to_string();
         let w_ae = to_wide(&init_auto_eol);
         SendMessageW(cmb_eol, CB_ADDSTRING, 0, w_ae.as_ptr() as LPARAM);
         populate_combo(cmb_eol, EOL_FIXED_ITEMS);
 
-        populate_combo(cmb_display, DISPLAY_ITEMS);
+        populate_combo(cmb_display, &[tr("Text", "テキスト"), "HEX", "BIN"]);
 
         EnableWindow(btn_kill, 0);
 
-        // Register descriptive Japanese hover tooltips for every control
-        let tooltip_hwnd = create_tooltip_window(hwnd, hinst);
-        add_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            lbl_status,
-            "現在の接続状態・通信パラメータ・検出ハードウェア名を表示します\n緑:接続中 / 青:自動検出中 / 橙:再接続待機 / 赤:他プロセス占有中 / 灰:解放中",
-        );
-        add_combo_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            cmb_port,
-            if dedicated {
-                "このウィンドウ専用の COM ポート（別窓モードのため固定）"
-            } else {
-                "監視する COM ポートを選択します（接続中デバイスのハードウェア名も表示）"
-            },
-        );
-        add_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            btn_connect,
-            "COM ポートの接続／切断（解放）を切り替えます\nファームウェア書き込み前の一時解放にも使えます",
-        );
-        add_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            btn_auto,
-            "ボーレート・データビット・パリティ・ストップビット・改行コードの自動検出を再実行します",
-        );
-        add_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            btn_kill,
-            "この COM ポートを占有している他プロセスを終了し、即座に接続します（占有中のみ有効）",
-        );
-        add_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            btn_popout,
-            "この COM ポート専用の独立したウィンドウ（分割不可）で開きます",
-        );
-        add_combo_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            cmb_baud,
-            "ボーレート (bps)。Auto 時は現在の検出値を括弧内に表示します\n任意の数値の手入力も可能です",
-        );
-        add_combo_tooltip(tooltip_hwnd, hwnd, cmb_databits, "データビット長（通常は 8bit）");
-        add_combo_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            cmb_parity,
-            "パリティビット（N:なし / E:偶数 / O:奇数 / M:マーク / S:スペース）",
-        );
-        add_combo_tooltip(tooltip_hwnd, hwnd, cmb_stopbits, "ストップビット長（1 / 1.5 / 2）");
-        add_combo_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            cmb_eol,
-            "送信時に末尾へ付加する改行コード\nAuto 時は受信データから自動検出した改行コード（括弧内表示）を使用します",
-        );
-        add_combo_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            cmb_display,
-            "受信データの表示形式を切り替えます\nテキスト: 文字化け・制御文字も含めてそのまま表示\nHEX: 16進ダンプ + ASCII プレビュー\nBIN: 2進ビット列表示（独自バイナリパケット解析向け）",
-        );
-        add_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            chk_autoscroll,
-            "新しい受信時に自動で最下部へスクロールします\n上へスクロールすると自動OFF、一番下までスクロールすると自動ONになります",
-        );
-        add_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            chk_timestamp,
-            "各受信行の先頭にローカル時刻（HH:MM:SS.mmm）を表示します\n※ログファイルには常に日付+時刻が記録されます",
-        );
-        add_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            chk_wrap,
-            "長い行を画面幅で折り返して表示します\nOFF 時は横スクロール表示（Shift + ホイールで横スクロール可能）",
-        );
-        add_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            btn_clear,
-            "このポートの表示ログとログファイル内容をクリアします",
-        );
-        add_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            edit_send,
-            "デバイスへ送信する文字列を入力します（Enter で送信 / ↑↓ キーで送信履歴 / Ctrl+ホイール・Ctrl+±/0 で拡大縮小）",
-        );
-        add_tooltip(
-            tooltip_hwnd,
-            hwnd,
-            btn_send,
-            "入力した文字列に改行コードを付けてデバイスへ送信します",
-        );
-
         let last_applied_serial = config.serial;
-        Self {
+        let mut st = Self {
             hwnd,
+            hinst,
             manager,
             theme,
             dedicated,
@@ -701,7 +626,7 @@ impl PaneState {
             updating_ui: false,
             send_history: Vec::new(),
             history_idx: None,
-            tooltip_hwnd,
+            tooltip_hwnd: null_mut(),
             lbl_status,
             cmb_port,
             btn_connect,
@@ -721,7 +646,11 @@ impl PaneState {
             log_view,
             edit_send,
             btn_send,
-        }
+        };
+        st.apply_dark_styles();
+        st.apply_language_labels();
+        st.rebuild_tooltips();
+        st
     }
 
     unsafe fn init_after_create(&mut self) {
@@ -733,6 +662,36 @@ impl PaneState {
             self.attach_port(self.config.port.clone(), self.config.connected);
         }
         self.layout();
+    }
+
+    unsafe fn apply_dark_styles(&self) {
+        let dark = self.theme.dark;
+        for b in [
+            self.btn_connect,
+            self.btn_auto,
+            self.btn_kill,
+            self.btn_popout,
+            self.btn_clear,
+            self.btn_send,
+        ] {
+            apply_ctrl_dark_mode(b, dark, CtrlThemeKind::Button);
+        }
+        for c in [
+            self.cmb_port,
+            self.cmb_baud,
+            self.cmb_databits,
+            self.cmb_parity,
+            self.cmb_stopbits,
+            self.cmb_eol,
+            self.cmb_display,
+        ] {
+            apply_ctrl_dark_mode(c, dark, CtrlThemeKind::Combo);
+        }
+        for chk in [self.chk_autoscroll, self.chk_timestamp, self.chk_wrap] {
+            apply_ctrl_dark_mode(chk, dark, CtrlThemeKind::Checkbox);
+        }
+        apply_ctrl_dark_mode(self.edit_send, dark, CtrlThemeKind::Edit);
+        logview_set_dark_mode(self.log_view, dark);
     }
 
     unsafe fn apply_theme(&mut self, theme: Arc<UiTheme>) {
@@ -763,9 +722,222 @@ impl PaneState {
             SendMessageW(ctrl, WM_SETFONT, f_ui, 1);
         }
         SendMessageW(self.edit_send, WM_SETFONT, f_mono, 1);
+        self.apply_dark_styles();
         logview_set_dpi(self.log_view, self.theme.dpi);
         self.layout();
         InvalidateRect(self.hwnd, null(), 1);
+    }
+
+    unsafe fn apply_language_labels(&mut self) {
+        let released = matches!(self.last_state, ConnectionState::Released);
+        set_window_text(
+            self.btn_connect,
+            if released {
+                tr("Connect", "接続")
+            } else {
+                tr("Disc.", "切断")
+            },
+        );
+        set_window_text(self.btn_auto, tr("Auto", "Auto検出"));
+        set_window_text(self.btn_kill, tr("Kill Owner", "占有終了"));
+        set_window_text(self.btn_popout, tr("Pop", "別窓"));
+        set_window_text(self.chk_autoscroll, tr("Auto-scroll", "自動スクロール"));
+        set_window_text(self.chk_timestamp, tr("Time", "時刻"));
+        set_window_text(self.chk_wrap, tr("Wrap", "折り返し"));
+        set_window_text(self.btn_clear, tr("Clear", "クリア"));
+        set_window_text(self.btn_send, tr("Send", "送信"));
+
+        // Update DisplayMode item 0 ("Text" / "テキスト")
+        self.update_auto_combo_item0(self.cmb_display, tr("Text", "テキスト"));
+
+        if self.config.port.is_empty() {
+            let txt = format!(" ○ {}", tr("No port selected", "ポート未選択"));
+            self.update_status_banner(&txt, ConnectionState::Released);
+        }
+    }
+
+    unsafe fn apply_language(&mut self) {
+        self.apply_language_labels();
+        self.rebuild_tooltips();
+        // Force port combo placeholder & status banner refresh
+        self.combo_ports.clear();
+        let ports = self.manager.list_ports();
+        self.populate_port_combo(&ports);
+        self.last_status_text.clear();
+        self.last_auto_eol_label.clear();
+        self.poll_session();
+        self.layout();
+        InvalidateRect(self.hwnd, null(), 1);
+    }
+
+    unsafe fn rebuild_tooltips(&mut self) {
+        if !self.tooltip_hwnd.is_null() {
+            DestroyWindow(self.tooltip_hwnd);
+        }
+        let tip = create_tooltip_window(self.hwnd, self.hinst);
+        self.tooltip_hwnd = tip;
+        let hwnd = self.hwnd;
+
+        add_tooltip(
+            tip,
+            hwnd,
+            self.lbl_status,
+            tr(
+                "Live connection state, serial settings, and detected hardware.\nGreen: Connected / Blue: Detecting / Amber: Waiting / Red: Occupied / Gray: Released",
+                "現在の接続状態・通信パラメータ・検出ハードウェア名を表示します\n緑:接続中 / 青:自動検出中 / 橙:再接続待機 / 赤:他プロセス占有中 / 灰:解放中",
+            ),
+        );
+        add_combo_tooltip(
+            tip,
+            hwnd,
+            self.cmb_port,
+            if self.dedicated {
+                tr(
+                    "Dedicated COM port for this popped-out window (fixed)",
+                    "このウィンドウ専用の COM ポート（別窓モードのため固定）",
+                )
+            } else {
+                tr(
+                    "Select a COM port to monitor (displays detected hardware name)",
+                    "監視する COM ポートを選択します（接続中デバイスのハードウェア名も表示）",
+                )
+            },
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_connect,
+            tr(
+                "Connect or release this COM port (release before flashing firmware)",
+                "COM ポートの接続／切断（解放）を切り替えます\nファームウェア書き込み前の一時解放にも使えます",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_auto,
+            tr(
+                "Re-run automatic detection for baud rate, framing, and line ending",
+                "ボーレート・データビット・パリティ・ストップビット・改行コードの自動検出を再実行します",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_kill,
+            tr(
+                "Terminate the process occupying this COM port and reconnect (active when occupied)",
+                "この COM ポートを占有している他プロセスを終了し、即座に接続します（占有中のみ有効）",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_popout,
+            tr(
+                "Open a dedicated single-port window for this COM port",
+                "この COM ポート専用の独立したウィンドウ（分割不可）で開きます",
+            ),
+        );
+        add_combo_tooltip(
+            tip,
+            hwnd,
+            self.cmb_baud,
+            tr(
+                "Baud rate (bps). Shows detected value in parentheses when Auto. Custom values allowed.",
+                "ボーレート (bps)。Auto 時は現在の検出値を括弧内に表示します\n任意の数値の手入力も可能です",
+            ),
+        );
+        add_combo_tooltip(
+            tip,
+            hwnd,
+            self.cmb_databits,
+            tr("Data bits (usually 8bit)", "データビット長（通常は 8bit）"),
+        );
+        add_combo_tooltip(
+            tip,
+            hwnd,
+            self.cmb_parity,
+            tr(
+                "Parity (N: None / E: Even / O: Odd / M: Mark / S: Space)",
+                "パリティビット（N:なし / E:偶数 / O:奇数 / M:マーク / S:スペース）",
+            ),
+        );
+        add_combo_tooltip(
+            tip,
+            hwnd,
+            self.cmb_stopbits,
+            tr("Stop bits (1 / 1.5 / 2)", "ストップビット長（1 / 1.5 / 2）"),
+        );
+        add_combo_tooltip(
+            tip,
+            hwnd,
+            self.cmb_eol,
+            tr(
+                "Line ending appended on send. Auto uses the detected RX line ending.",
+                "送信時に末尾へ付加する改行コード\nAuto 時は受信データから自動検出した改行コード（括弧内表示）を使用します",
+            ),
+        );
+        add_combo_tooltip(
+            tip,
+            hwnd,
+            self.cmb_display,
+            tr(
+                "Display mode: Text (lossy UTF-8 + control dots) / HEX (hex dump + ASCII) / BIN (8-bit binary)",
+                "受信データの表示形式を切り替えます\nテキスト: 文字化け・制御文字も含めてそのまま表示\nHEX: 16進ダンプ + ASCII プレビュー\nBIN: 2進ビット列表示（独自バイナリパケット解析向け）",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.chk_autoscroll,
+            tr(
+                "Auto-scroll to bottom on new data. Automatically disables on scroll up and re-enables at bottom.",
+                "新しい受信時に自動で最下部へスクロールします\n上へスクロールすると自動OFF、一番下までスクロールすると自動ONになります",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.chk_timestamp,
+            tr(
+                "Show local time (HH:MM:SS.mmm) on each line. Log files always include full date & time.",
+                "各受信行の先頭にローカル時刻（HH:MM:SS.mmm）を表示します\n※ログファイルには常に日付+時刻が記録されます",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.chk_wrap,
+            tr(
+                "Wrap long lines to fit viewport width. When OFF, use horizontal scroll (Shift + Wheel).",
+                "長い行を画面幅で折り返して表示します\nOFF 時は横スクロール表示（Shift + ホイールで横スクロール可能）",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_clear,
+            tr(
+                "Clear log display and truncate log file for this port",
+                "このポートの表示ログとログファイル内容をクリアします",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.edit_send,
+            tr(
+                "Type text to send (Enter: Send / Up-Down: History / Ctrl+Wheel or Ctrl+±/0: Zoom)",
+                "デバイスへ送信する文字列を入力します（Enter で送信 / ↑↓ キーで送信履歴 / Ctrl+ホイール・Ctrl+±/0 で拡大縮小）",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_send,
+            tr("Send input text with selected line ending", "入力した文字列に改行コードを付けてデバイスへ送信します"),
+        );
     }
 
     unsafe fn update_auto_combo_item0(&mut self, cmb: HWND, new_label: &str) {
@@ -866,7 +1038,7 @@ impl PaneState {
         let mut labels: Vec<String> = Vec::new();
 
         new_ports.push(String::new());
-        labels.push("(COMポート選択)".to_string());
+        labels.push(tr("(Select COM Port)", "(COMポート選択)").to_string());
 
         for p in ports {
             new_ports.push(p.name.clone());
@@ -875,7 +1047,11 @@ impl PaneState {
 
         if !self.config.port.is_empty() && !new_ports.iter().any(|x| x == &self.config.port) {
             new_ports.push(self.config.port.clone());
-            labels.push(format!("{} (未接続)", self.config.port));
+            labels.push(format!(
+                "{} ({})",
+                self.config.port,
+                tr("Offline", "未接続")
+            ));
         }
 
         if new_ports == self.combo_ports {
@@ -914,9 +1090,10 @@ impl PaneState {
         if port.is_empty() {
             self.session = None;
             self.last_state = ConnectionState::Released;
-            set_window_text(self.btn_connect, "接続");
+            set_window_text(self.btn_connect, tr("Connect", "接続"));
             EnableWindow(self.btn_kill, 0);
-            self.update_status_banner(" ○ ポート未選択", ConnectionState::Released);
+            let txt = format!(" ○ {}", tr("No port selected", "ポート未選択"));
+            self.update_status_banner(&txt, ConnectionState::Released);
             self.notify_parent_changed();
             return;
         }
@@ -1184,7 +1361,7 @@ impl PaneState {
         let desired_auto_eol = if snap.detected_eol != LineEnding::None {
             format!("Auto ({})", snap.detected_eol.label())
         } else {
-            "Auto (待機)".to_string()
+            tr("Auto (wait)", "Auto (待機)").to_string()
         };
         if desired_auto_eol != self.last_auto_eol_label {
             self.last_auto_eol_label = desired_auto_eol.clone();
@@ -1204,7 +1381,7 @@ impl PaneState {
         };
         let auto_tag = if snap.config.auto_detect {
             if snap.auto_locked {
-                " [Auto確定]"
+                tr(" [Auto]", " [Auto確定]")
             } else {
                 " [Auto]"
             }
@@ -1219,7 +1396,8 @@ impl PaneState {
 
         let status_text = match &snap.state {
             ConnectionState::Connected => format!(
-                " ● 接続中  {}  {} {}{}{}{}",
+                " ● {}  {}  {} {}{}{}{}",
+                tr("Connected", "接続中"),
                 snap.port,
                 snap.config.baud,
                 snap.config.framing_label(),
@@ -1227,31 +1405,59 @@ impl PaneState {
                 auto_tag,
                 hw_suffix
             ),
-            ConnectionState::Connecting => format!(" ● 接続中...  {}{}", snap.port, hw_suffix),
-            ConnectionState::AutoDetecting { probing_baud } => {
-                format!(
-                    " ● 自動検出中...  {} ({} bps 確認中)",
-                    snap.port, probing_baud
-                )
-            }
+            ConnectionState::Connecting => format!(
+                " ● {}  {}{}",
+                tr("Connecting...", "接続中..."),
+                snap.port,
+                hw_suffix
+            ),
+            ConnectionState::AutoDetecting { probing_baud } => match lang() {
+                Lang::En => format!(" ● Detecting...  {} (probing {} bps)", snap.port, probing_baud),
+                Lang::Ja => format!(" ● 自動検出中...  {} ({} bps 確認中)", snap.port, probing_baud),
+            },
             ConnectionState::Occupied { owner } => match owner {
                 Some(o) => format!(
-                    " ● 他プロセス占有中  {}  [{} (PID {})]",
-                    snap.port, o.name, o.pid
+                    " ● {}  {}  [{} (PID {})]",
+                    tr("Occupied", "他プロセス占有中"),
+                    snap.port,
+                    o.name,
+                    o.pid
                 ),
-                None => format!(" ● 他プロセス占有中  {}  (プロセス検索中...)", snap.port),
+                None => format!(
+                    " ● {}  {}  ({})",
+                    tr("Occupied", "他プロセス占有中"),
+                    snap.port,
+                    tr("identifying process...", "プロセス検索中...")
+                ),
             },
             ConnectionState::Disconnected { reason } => {
-                format!(" ● 切断中  {}  ({})", snap.port, reason)
+                format!(
+                    " ● {}  {}  ({})",
+                    tr("Disconnected", "切断中"),
+                    snap.port,
+                    reason
+                )
             }
-            ConnectionState::Released => format!(" ○ 切断中 (解放)  {}{}", snap.port, hw_suffix),
+            ConnectionState::Released => format!(
+                " ○ {}  {}{}",
+                tr("Released", "切断中 (解放)"),
+                snap.port,
+                hw_suffix
+            ),
         };
 
         let occupied = matches!(snap.state, ConnectionState::Occupied { .. });
         let released = matches!(snap.state, ConnectionState::Released);
         if self.last_state != snap.state {
             EnableWindow(self.btn_kill, if occupied { 1 } else { 0 });
-            set_window_text(self.btn_connect, if released { "接続" } else { "切断" });
+            set_window_text(
+                self.btn_connect,
+                if released {
+                    tr("Connect", "接続")
+                } else {
+                    tr("Disc.", "切断")
+                },
+            );
         }
         self.update_status_banner(&status_text, snap.state);
 
@@ -1305,9 +1511,9 @@ impl PaneState {
 
         // 1. Row 1: Port combo + Connect + Auto + Kill (+ Popout when not dedicated)
         let y1 = status_h + pad;
-        let btn_conn_w = s(48);
+        let btn_conn_w = s(58);
         let btn_auto_w = s(68);
-        let btn_kill_w = s(68);
+        let btn_kill_w = s(74);
         let btn_pop_w = if self.dedicated { 0 } else { s(44) };
         let right_fixed =
             btn_conn_w + btn_auto_w + btn_kill_w + btn_pop_w + pad * (if self.dedicated { 4 } else { 5 });

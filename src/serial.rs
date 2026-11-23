@@ -2,6 +2,7 @@ use crate::autodetect::{
     detect_7bit_parity, score_serial_sample, LineEndingDetector, CANDIDATE_BAUDS,
     CANDIDATE_FRAMINGS,
 };
+use crate::i18n::tr;
 use crate::process_lock;
 use crate::types::{
     bytes_to_hex_compact, now_ms_and_local_datetime, ConnectionState, LineEnding, LogEntry,
@@ -712,7 +713,11 @@ fn worker_loop(session: Arc<PortSession>) {
                         assembler.clear();
                         session.push_log(
                             LogKind::SysDisconnect,
-                            format!("切断しました ({})", session.port_name),
+                            format!(
+                                "{} ({})",
+                                tr("Disconnected", "切断しました"),
+                                session.port_name
+                            ),
                         );
                     }
                     session.set_state(ConnectionState::Released);
@@ -748,10 +753,15 @@ fn worker_loop(session: Arc<PortSession>) {
                             session.push_log(
                                 LogKind::SysInfo,
                                 format!(
-                                    "設定変更: {} {} {}",
+                                    "{}: {} {} {}",
+                                    tr("Config updated", "設定変更"),
                                     new_cfg.baud,
                                     new_cfg.framing_label(),
-                                    if new_cfg.auto_detect { "[Auto]" } else { "[手動]" }
+                                    if new_cfg.auto_detect {
+                                        "[Auto]"
+                                    } else {
+                                        tr("[Manual]", "[手動]")
+                                    }
                                 ),
                             );
                         }
@@ -778,11 +788,14 @@ fn worker_loop(session: Arc<PortSession>) {
                         if let Err(err) = p.write_all(&data) {
                             session.push_log(
                                 LogKind::SysError,
-                                format!("送信エラー (Win32 error {})", err),
+                                format!("{} (Win32 error {})", tr("Send failed", "送信エラー"), err),
                             );
                         }
                     } else {
-                        session.push_log(LogKind::SysError, "未接続のため送信できません".into());
+                        session.push_log(
+                            LogKind::SysError,
+                            tr("Not connected — cannot send", "未接続のため送信できません").into(),
+                        );
                     }
                 }
                 PortCommand::KillOwnerAndConnect => {
@@ -798,7 +811,15 @@ fn worker_loop(session: Arc<PortSession>) {
                             Ok(()) => {
                                 session.push_log(
                                     LogKind::SysInfo,
-                                    format!("占有プロセス {} (PID {}) を終了しました", name, pid),
+                                    match crate::i18n::lang() {
+                                        crate::i18n::Lang::En => {
+                                            format!("Terminated owner {} (PID {})", name, pid)
+                                        }
+                                        crate::i18n::Lang::Ja => format!(
+                                            "占有プロセス {} (PID {}) を終了しました",
+                                            name, pid
+                                        ),
+                                    },
                                 );
                                 want_connected = true;
                                 last_reconnect_try = Instant::now() - Duration::from_secs(10);
@@ -811,7 +832,11 @@ fn worker_loop(session: Arc<PortSession>) {
                     } else {
                         session.push_log(
                             LogKind::SysInfo,
-                            "占有プロセスが見つかりませんでした（再接続を試行します）".into(),
+                            tr(
+                                "Occupying process not found (retrying connection)",
+                                "占有プロセスが見つかりませんでした（再接続を試行します）",
+                            )
+                            .into(),
                         );
                         want_connected = true;
                         last_reconnect_try = Instant::now() - Duration::from_secs(10);
@@ -871,9 +896,9 @@ fn worker_loop(session: Arc<PortSession>) {
                     eol_detector.reset();
 
                     let verb = if had_connected_once {
-                        "再接続しました"
+                        tr("Reconnected", "再接続しました")
                     } else {
-                        "接続しました"
+                        tr("Connected", "接続しました")
                     };
                     had_connected_once = true;
                     session.set_state(ConnectionState::Connected);
@@ -895,7 +920,6 @@ fn worker_loop(session: Arc<PortSession>) {
                         let g = session.inner.lock().unwrap();
                         g.state.owner().cloned()
                     };
-                    // Refresh process owner every 2.5 seconds (or immediately if unknown)
                     let owner = if existing_owner.is_none()
                         || last_owner_check.elapsed() >= Duration::from_millis(2500)
                     {
@@ -909,15 +933,19 @@ fn worker_loop(session: Arc<PortSession>) {
                         g.state.code()
                     };
                     if prev_code != "occupied" {
-                        let msg = match &owner {
-                            Some(o) => format!(
-                                "{} は {} (PID {}) によって使用中です",
-                                session.port_name, o.name, o.pid
-                            ),
-                            None => format!(
-                                "{} は他のプロセスによって使用中です",
-                                session.port_name
-                            ),
+                        let msg = match (&owner, crate::i18n::lang()) {
+                            (Some(o), crate::i18n::Lang::En) => {
+                                format!("{} is in use by {} (PID {})", session.port_name, o.name, o.pid)
+                            }
+                            (Some(o), crate::i18n::Lang::Ja) => {
+                                format!("{} は {} (PID {}) によって使用中です", session.port_name, o.name, o.pid)
+                            }
+                            (None, crate::i18n::Lang::En) => {
+                                format!("{} is in use by another process", session.port_name)
+                            }
+                            (None, crate::i18n::Lang::Ja) => {
+                                format!("{} は他のプロセスによって使用中です", session.port_name)
+                            }
                         };
                         session.push_log(LogKind::SysError, msg);
                     }
@@ -929,14 +957,19 @@ fn worker_loop(session: Arc<PortSession>) {
                         g.state.code()
                     };
                     let reason = if err == 2 || err == 3 || err == 1167 {
-                        "デバイス未接続 (再接続待機)".to_string()
+                        tr("Device not connected (waiting)", "デバイス未接続 (再接続待機)").to_string()
                     } else {
-                        format!("接続待機中 (error {})", err)
+                        format!("{} (error {})", tr("Waiting", "接続待機中"), err)
                     };
                     if prev_code == "connected" || prev_code == "autodetecting" {
                         session.push_log(
                             LogKind::SysDisconnect,
-                            format!("切断されました ({}: {})", session.port_name, reason),
+                            format!(
+                                "{} ({}: {})",
+                                tr("Disconnected", "切断されました"),
+                                session.port_name,
+                                reason
+                            ),
                         );
                     }
                     session.set_state(ConnectionState::Disconnected { reason });
@@ -979,7 +1012,8 @@ fn worker_loop(session: Arc<PortSession>) {
                                 session.push_log(
                                     LogKind::SysInfo,
                                     format!(
-                                        "Auto検出: {} {} に自動設定しました",
+                                        "{}: {} {}",
+                                        tr("Auto-detected", "Auto検出"),
                                         new_cfg.baud,
                                         new_cfg.framing_label()
                                     ),
@@ -1000,9 +1034,11 @@ fn worker_loop(session: Arc<PortSession>) {
                                 session.push_log(
                                     LogKind::SysInfo,
                                     format!(
-                                        "Auto検出: {} {} を確認しました",
+                                        "{}: {} {} {}",
+                                        tr("Auto-detect", "Auto検出"),
                                         cfg.baud,
-                                        cfg.framing_label()
+                                        cfg.framing_label(),
+                                        tr("confirmed", "を確認しました")
                                     ),
                                 );
                                 emit_rx_bytes(
@@ -1101,12 +1137,14 @@ fn worker_loop(session: Arc<PortSession>) {
                 // Device unplugged or hardware error!
                 port_handle = None;
                 assembler.clear();
-                let reason = format!("切断されました (error {})", err);
+                let reason = format!("{} (error {})", tr("Disconnected", "切断されました"), err);
                 session.push_log(
                     LogKind::SysDisconnect,
                     format!(
-                        "デバイスが切断されました ({}) — 再接続を待機します",
-                        session.port_name
+                        "{} ({}) — {}",
+                        tr("Device disconnected", "デバイスが切断されました"),
+                        session.port_name,
+                        tr("waiting for reconnect", "再接続を待機します")
                     ),
                 );
                 session.set_state(ConnectionState::Disconnected { reason });
@@ -1306,9 +1344,11 @@ fn run_active_autodetect(
         session.push_log(
             LogKind::SysInfo,
             format!(
-                "Auto検出完了: {} {} (スコア {:.0}%)",
+                "{}: {} {} ({} {:.0}%)",
+                tr("Auto-detected", "Auto検出完了"),
                 final_cfg.baud,
                 final_cfg.framing_label(),
+                tr("score", "スコア"),
                 best_score * 100.0
             ),
         );
@@ -1319,14 +1359,15 @@ fn run_active_autodetect(
         session.push_log(
             LogKind::SysInfo,
             format!(
-                "バイナリ/独自形式データを検出 — {} {} で受信中（テキスト/HEX/BIN 表示切替可）",
+                "{} — {} {} ({})",
+                tr("Binary / custom packet detected", "バイナリ/独自形式データを検出"),
                 final_cfg.baud,
-                final_cfg.framing_label()
+                final_cfg.framing_label(),
+                tr("switch Text/HEX/BIN", "テキスト/HEX/BIN 表示切替可")
             ),
         );
         if !fallback_sample.is_empty() {
             emit_rx_bytes(session, &fallback_sample, assembler, eol_detector);
-            // Force immediate flush so the captured binary sample displays right away
             let mut packets = Vec::new();
             assembler.flush_if_idle(0, &mut packets);
             for (text, raw) in packets {
@@ -1337,7 +1378,8 @@ fn run_active_autodetect(
         session.push_log(
             LogKind::SysInfo,
             format!(
-                "Auto検出: データ受信なし — {} {} で受信待機中",
+                "{} — {} {}",
+                tr("Auto-detect: waiting for data", "Auto検出: データ受信待機中"),
                 final_cfg.baud,
                 final_cfg.framing_label()
             ),

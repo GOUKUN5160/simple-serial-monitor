@@ -1,5 +1,5 @@
 use crate::types::{DisplayMode, LogEntry, LogKind};
-use crate::ui::{dpi_scale, rgb, to_wide, window_dpi};
+use crate::ui::{apply_ctrl_dark_mode, dpi_scale, rgb, to_wide, window_dpi, CtrlThemeKind};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -253,6 +253,11 @@ pub unsafe fn logview_reset_zoom(hwnd: HWND) {
     if !ptr.is_null() {
         (*ptr).set_zoom(100);
     }
+}
+
+pub unsafe fn logview_set_dark_mode(hwnd: HWND, dark: bool) {
+    apply_ctrl_dark_mode(hwnd, dark, CtrlThemeKind::Scroll);
+    InvalidateRect(hwnd, null(), 1);
 }
 
 unsafe extern "system" fn logview_wnd_proc(

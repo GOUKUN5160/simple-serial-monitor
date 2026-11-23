@@ -1,5 +1,6 @@
+use crate::i18n::Lang;
 use crate::json::{obj, parse, Json};
-use crate::types::{LayoutMode, NotifyMode, PaneConfig, WindowRect};
+use crate::types::{LayoutMode, NotifyMode, PaneConfig, ThemeMode, WindowRect};
 use std::path::PathBuf;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
@@ -103,6 +104,8 @@ impl WindowStateConfig {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub api_port: u16,
+    pub lang: Lang,
+    pub theme_mode: ThemeMode,
     pub notify_mode: NotifyMode,
     pub main_rect: WindowRect,
     pub layout: LayoutMode,
@@ -120,6 +123,8 @@ impl Default for AppConfig {
         }
         Self {
             api_port: DEFAULT_API_PORT,
+            lang: Lang::detect_os_default(),
+            theme_mode: ThemeMode::System,
             notify_mode: NotifyMode::InApp,
             main_rect: WindowRect::default(),
             layout: LayoutMode::Grid1x1,
@@ -139,6 +144,8 @@ impl AppConfig {
         obj(vec![
             ("version", Json::Num(3.0)),
             ("api_port", Json::Num(self.api_port as f64)),
+            ("lang", Json::Str(self.lang.as_str().to_string())),
+            ("theme", Json::Str(self.theme_mode.as_str().to_string())),
             (
                 "notify_mode",
                 Json::Str(self.notify_mode.as_str().to_string()),
@@ -158,6 +165,12 @@ impl AppConfig {
             if (1024..=65535).contains(&p) {
                 cfg.api_port = p as u16;
             }
+        }
+        if let Some(l) = j.get("lang").and_then(|v| v.as_str()).and_then(Lang::from_str) {
+            cfg.lang = l;
+        }
+        if let Some(t) = j.get("theme").and_then(|v| v.as_str()) {
+            cfg.theme_mode = ThemeMode::from_str(t);
         }
         if let Some(nm) = j.get("notify_mode").and_then(|v| v.as_str()) {
             cfg.notify_mode = NotifyMode::from_str(nm);

@@ -1,6 +1,6 @@
 [package]
 name = "simple-serial-monitor"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Ultra-lightweight native Windows serial monitor for ESP32, Raspberry Pi, and Arduino with multi-port views and coding-agent interface"
 

@@ -1,6 +1,7 @@
 pub mod agent_api;
 pub mod autodetect;
 pub mod config;
+pub mod i18n;
 pub mod json;
 pub mod manager;
 pub mod ports;

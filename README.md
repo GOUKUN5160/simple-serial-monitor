@@ -6,10 +6,15 @@ An ultra-lightweight, native Win32 serial monitor built in Rust for embedded dev
 
 Designed to be fast, minimal, and truly portable — no Electron, no WebView2, no .NET, and no Visual C++ Redistributable required. Just unzip and run (~500 KB standalone executable).
 
+![Simple Serial Monitor (Dark Mode, 4-Pane Layout)](docs/screenshot-en.png)
+
 ---
 
 ## Features
 
+- **Dark / Light Mode & Bilingual UI (English / Japanese)**
+  - Native Windows Dark Mode (dark titlebar, controls, scrollbars, and settings dialog) with **System / Light / Dark** modes.
+  - Instant live language switching between **English** and **Japanese** from the **Settings** dialog.
 - **Auto-Detection & Manual Override**
   - Automatically detects baud rate (`115200`, `9600`, `74880`, `57600`, `38400`, `230400`, `460800`, `921600`, etc.), data bits (`8/7/6/5`), parity (`N/E/O/M/S`), stop bits (`1/1.5/2`), and line ending (`CRLF`/`LF`/`CR`).
   - Displays the currently active/detected value directly inside the dropdowns when set to Auto (e.g., `Auto (115200)`, `Auto (LF)`).
@@ -99,6 +104,8 @@ Available tools:
 ```
 
 ### 3. Local HTTP REST & SSE API (`http://127.0.0.1:27182`)
+
+Click the **`Agent API: 127.0.0.1:27182`** button in the top bar at any time to copy the URL to your clipboard (port configurable in **Settings**).
 
 - `GET /api/status` — Server status and summary of all ports
 - `GET /api/ports?refresh=1` — Active COM ports list (JSON)

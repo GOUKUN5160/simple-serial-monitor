@@ -1,22 +1,29 @@
 use crate::config::{
     clamp_rect_to_screen, save_config, AppConfig, WindowStateConfig, DEFAULT_API_PORT,
 };
+use crate::i18n::{lang, set_lang, tr};
 use crate::manager::MonitorManager;
-use crate::types::{LayoutMode, NotifyMode, PaneConfig, WindowRect};
+use crate::types::{LayoutMode, NotifyMode, PaneConfig, ThemeMode, WindowRect};
 use crate::ui::notify::{init_tray_icon, notify_new_devices, remove_tray_icon};
 use crate::ui::pane::{
-    create_pane, pane_apply_theme, pane_get_config, pane_refresh_ports, pane_set_visible,
-    WM_PANE_CONFIG_CHANGED, WM_PANE_POPOUT,
+    create_pane, pane_apply_language, pane_apply_theme, pane_get_config, pane_refresh_ports,
+    pane_set_visible, WM_PANE_CONFIG_CHANGED, WM_PANE_POPOUT,
 };
-use crate::ui::tooltip::{add_combo_tooltip, add_tooltip, create_tooltip_window};
-use crate::ui::{dpi_scale, rgb, set_window_text, to_wide, window_dpi, UiTheme, IDI_APP_ICON};
+use crate::ui::settings::{
+    open_settings_dialog, settings_get_values, SettingsValues, WM_SETTINGS_CHANGED,
+};
+use crate::ui::tooltip::{add_tooltip, create_tooltip_window};
+use crate::ui::{
+    apply_ctrl_dark_mode, apply_window_dark_titlebar, copy_text_to_clipboard, dpi_scale,
+    resolve_is_dark, set_window_text, to_wide, window_dpi, CtrlThemeKind, UiTheme, IDI_APP_ICON,
+};
 use std::cell::RefCell;
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, ScreenToClient,
-    COLOR_BTNFACE, HFONT, PAINTSTRUCT,
+    BeginPaint, EndPaint, FillRect, InvalidateRect, ScreenToClient, SetBkColor, SetTextColor,
+    COLOR_BTNFACE, HDC, HFONT, PAINTSTRUCT,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -24,21 +31,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetSystemMetrics,
     GetWindowLongPtrW, GetWindowPlacement, IsWindow, KillTimer, LoadCursorW, LoadImageW,
     MoveWindow, PostQuitMessage, RegisterClassExW, SendMessageW, SetCursor, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, BS_PUSHBUTTON, CBN_SELCHANGE, CBS_DROPDOWNLIST,
-    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA,
-    HICON, HTCLIENT, IDC_ARROW, IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE, IMAGE_ICON, LR_DEFAULTCOLOR,
-    LR_SHARED, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_HIDE, SW_MAXIMIZE, SW_SHOW, SW_SHOWNORMAL, WINDOWPLACEMENT, WM_CAPTURECHANGED, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR, WM_SETFONT, WM_SIZE,
-    WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW,
+    CS_VREDRAW, GWLP_USERDATA, HICON, HTCLIENT, IDC_ARROW, IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE,
+    IMAGE_ICON, LR_DEFAULTCOLOR, LR_SHARED, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_SHOW, SW_SHOWNORMAL, WINDOWPLACEMENT,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC,
+    WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSEXW,
+    WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 const MAIN_CLASS_NAME: &str = "SsmMainWindowClass";
-
-const SS_CENTERIMAGE: u32 = 0x0200;
-const SS_RIGHT: u32 = 0x0002;
-const SS_NOTIFY: u32 = 0x0100;
 
 const ID_BTN_1X1: isize = 201;
 const ID_BTN_1X2: isize = 202;
@@ -46,13 +49,12 @@ const ID_BTN_2X1: isize = 203;
 const ID_BTN_2X2: isize = 204;
 const ID_BTN_NEW_WIN: isize = 205;
 const ID_BTN_REFRESH: isize = 206;
-const ID_CMB_NOTIFY: isize = 207;
+const ID_BTN_API: isize = 207;
 const ID_BTN_OPEN_LOGS: isize = 208;
-const ID_LBL_API: isize = 209;
+const ID_BTN_SETTINGS: isize = 209;
 
 const TIMER_REFRESH_ID: usize = 10;
-
-const NOTIFY_ITEMS: &[&str] = &["通知:OFF", "通知:アプリ内", "通知:Windows", "通知:両方"];
+const TIMER_API_COPIED_ID: usize = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DragAxis {
@@ -62,11 +64,12 @@ enum DragAxis {
     Both,
 }
 
-// Thread-local GUI window registry (Win32 message loop is single-threaded).
 thread_local! {
     static OPEN_WINDOWS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
     static SHUTTING_DOWN: RefCell<bool> = const { RefCell::new(false) };
     static GLOBAL_NOTIFY_MODE: RefCell<NotifyMode> = const { RefCell::new(NotifyMode::InApp) };
+    static GLOBAL_THEME_MODE: RefCell<ThemeMode> = const { RefCell::new(ThemeMode::System) };
+    static CONFIGURED_API_PORT: RefCell<u16> = const { RefCell::new(DEFAULT_API_PORT) };
     static PRIMARY_HWND: RefCell<HWND> = const { RefCell::new(null_mut()) };
     static TRAY_READY: RefCell<bool> = const { RefCell::new(false) };
 }
@@ -89,7 +92,8 @@ struct MonitorWindowState {
     dedicated: bool,
     manager: Arc<MonitorManager>,
     theme: Arc<UiTheme>,
-    api_port: u16,
+    active_api_port: Option<u16>,
+    api_copied_flash: bool,
     layout: LayoutMode,
     split_x: f32,
     split_y: f32,
@@ -103,9 +107,9 @@ struct MonitorWindowState {
     btn_2x2: HWND,
     btn_new_win: HWND,
     btn_refresh: HWND,
-    cmb_notify: HWND,
-    lbl_api: HWND,
+    btn_api: HWND,
     btn_open_logs: HWND,
+    btn_settings: HWND,
 }
 
 struct GridMetrics {
@@ -161,7 +165,10 @@ pub unsafe fn create_initial_windows(
     config: AppConfig,
     api_port: Option<u16>,
 ) -> HWND {
+    set_lang(config.lang);
     GLOBAL_NOTIFY_MODE.with(|m| *m.borrow_mut() = config.notify_mode);
+    GLOBAL_THEME_MODE.with(|t| *t.borrow_mut() = config.theme_mode);
+    CONFIGURED_API_PORT.with(|p| *p.borrow_mut() = config.api_port);
 
     let mut main_panes = config.main_panes;
     while main_panes.len() < 4 {
@@ -290,7 +297,10 @@ fn build_window_title(
     if dedicated {
         let port = panes.first().map(|p| p.port.as_str()).unwrap_or("");
         if port.is_empty() {
-            return "Simple Serial Monitor (専用ウィンドウ)".to_string();
+            return format!(
+                "Simple Serial Monitor ({})",
+                tr("Dedicated", "専用ウィンドウ")
+            );
         }
         if let Some(info) = manager.find_port_info(port) {
             if !info.hardware_label.is_empty() {
@@ -307,7 +317,10 @@ fn build_window_title(
         .map(|p| p.port.as_str())
         .collect();
     if active.is_empty() {
-        "Simple Serial Monitor (サブウィンドウ)".to_string()
+        format!(
+            "Simple Serial Monitor ({})",
+            tr("Window", "サブウィンドウ")
+        )
     } else {
         format!("{} - Simple Serial Monitor", active.join(" / "))
     }
@@ -323,7 +336,8 @@ unsafe extern "system" fn monitor_wnd_proc(
         let cs = &*(lparam as *const CREATESTRUCTW);
         let params = Box::from_raw(cs.lpCreateParams as *mut WindowCreateParams);
         let dpi = window_dpi(hwnd);
-        let theme = Arc::new(UiTheme::new(dpi));
+        let dark = resolve_is_dark(GLOBAL_THEME_MODE.with(|t| *t.borrow()));
+        let theme = Arc::new(UiTheme::new(dpi, dark));
         let f_ui = theme.font_ui;
 
         let mut btn_1x1 = null_mut();
@@ -332,133 +346,20 @@ unsafe extern "system" fn monitor_wnd_proc(
         let mut btn_2x2 = null_mut();
         let mut btn_new_win = null_mut();
         let mut btn_refresh = null_mut();
-        let mut cmb_notify = null_mut();
-        let mut lbl_api = null_mut();
+        let mut btn_api = null_mut();
         let mut btn_open_logs = null_mut();
-        let mut tooltip_hwnd = null_mut();
+        let mut btn_settings = null_mut();
 
         if !params.dedicated {
-            btn_1x1 = create_tb_btn(hwnd, cs.hInstance, "1画面", ID_BTN_1X1, f_ui);
-            btn_1x2 = create_tb_btn(hwnd, cs.hInstance, "2画面横", ID_BTN_1X2, f_ui);
-            btn_2x1 = create_tb_btn(hwnd, cs.hInstance, "2画面縦", ID_BTN_2X1, f_ui);
-            btn_2x2 = create_tb_btn(hwnd, cs.hInstance, "4画面", ID_BTN_2X2, f_ui);
-            btn_new_win =
-                create_tb_btn(hwnd, cs.hInstance, "+ 別ウィンドウ", ID_BTN_NEW_WIN, f_ui);
-            btn_refresh = create_tb_btn(hwnd, cs.hInstance, "ポート再検索", ID_BTN_REFRESH, f_ui);
-
-            if params.is_primary {
-                let cmb_cls = to_wide("COMBOBOX");
-                cmb_notify = CreateWindowExW(
-                    0,
-                    cmb_cls.as_ptr(),
-                    null(),
-                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST as u32,
-                    0,
-                    0,
-                    10,
-                    10,
-                    hwnd,
-                    ID_CMB_NOTIFY as _,
-                    cs.hInstance,
-                    null(),
-                );
-                SendMessageW(cmb_notify, WM_SETFONT, f_ui as WPARAM, 1);
-                for &item in NOTIFY_ITEMS {
-                    let w = to_wide(item);
-                    SendMessageW(cmb_notify, CB_ADDSTRING, 0, w.as_ptr() as LPARAM);
-                }
-                let nm = GLOBAL_NOTIFY_MODE.with(|m| *m.borrow());
-                let idx = match nm {
-                    NotifyMode::Off => 0,
-                    NotifyMode::InApp => 1,
-                    NotifyMode::Windows => 2,
-                    NotifyMode::Both => 3,
-                };
-                SendMessageW(cmb_notify, CB_SETCURSEL, idx, 0);
-            }
-
-            btn_open_logs =
-                create_tb_btn(hwnd, cs.hInstance, "ログフォルダ", ID_BTN_OPEN_LOGS, f_ui);
-
-            let api_text = match params.api_port {
-                Some(p) => format!("Agent API: 127.0.0.1:{}", p),
-                None => "Agent API: 停止".to_string(),
-            };
-            let lbl_cls = to_wide("STATIC");
-            let lbl_txt = to_wide(&api_text);
-            lbl_api = CreateWindowExW(
-                0,
-                lbl_cls.as_ptr(),
-                lbl_txt.as_ptr(),
-                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_RIGHT | SS_NOTIFY,
-                0,
-                0,
-                10,
-                10,
-                hwnd,
-                ID_LBL_API as _,
-                cs.hInstance,
-                null(),
-            );
-            SendMessageW(lbl_api, WM_SETFONT, f_ui as WPARAM, 1);
-
-            tooltip_hwnd = create_tooltip_window(hwnd, cs.hInstance);
-            add_tooltip(
-                tooltip_hwnd,
-                hwnd,
-                btn_1x1,
-                "1 画面表示に切り替えます（分割比率もリセット）",
-            );
-            add_tooltip(
-                tooltip_hwnd,
-                hwnd,
-                btn_1x2,
-                "左右 2 画面表示に切り替えます\n画面の間をドラッグでサイズ変更でき、再度押すと均等幅にリセットされます",
-            );
-            add_tooltip(
-                tooltip_hwnd,
-                hwnd,
-                btn_2x1,
-                "上下 2 画面表示に切り替えます\n画面の間をドラッグでサイズ変更でき、再度押すと均等高さにリセットされます",
-            );
-            add_tooltip(
-                tooltip_hwnd,
-                hwnd,
-                btn_2x2,
-                "2×2 の 4 画面表示に切り替えます\n縦横の境界や中央交点をドラッグでサイズ変更でき、再度押すと均等にリセットされます",
-            );
-            add_tooltip(
-                tooltip_hwnd,
-                hwnd,
-                btn_new_win,
-                "複数画面分割に対応した新しいウィンドウを開きます",
-            );
-            add_tooltip(
-                tooltip_hwnd,
-                hwnd,
-                btn_refresh,
-                "アクティブな COM ポートとハードウェア名を手動で再スキャンします",
-            );
-            if !cmb_notify.is_null() {
-                add_combo_tooltip(
-                    tooltip_hwnd,
-                    hwnd,
-                    cmb_notify,
-                    "新しい COM デバイス接続時の通知方法を設定します\nOFF / アプリ内ポップアップ / Windows通知 / 両方",
-                );
-            }
-            add_tooltip(
-                tooltip_hwnd,
-                hwnd,
-                btn_open_logs,
-                "日付付きリアルタイムログファイルが保存されている logs フォルダを開きます",
-            );
-            add_tooltip(
-                tooltip_hwnd,
-                hwnd,
-                lbl_api,
-                "Antigravity / Codex / ssm-cli から同時アクセスできるローカル HTTP/SSE API アドレス",
-            );
+            btn_1x1 = create_tb_btn(hwnd, cs.hInstance, "", ID_BTN_1X1, f_ui);
+            btn_1x2 = create_tb_btn(hwnd, cs.hInstance, "", ID_BTN_1X2, f_ui);
+            btn_2x1 = create_tb_btn(hwnd, cs.hInstance, "", ID_BTN_2X1, f_ui);
+            btn_2x2 = create_tb_btn(hwnd, cs.hInstance, "", ID_BTN_2X2, f_ui);
+            btn_new_win = create_tb_btn(hwnd, cs.hInstance, "", ID_BTN_NEW_WIN, f_ui);
+            btn_refresh = create_tb_btn(hwnd, cs.hInstance, "", ID_BTN_REFRESH, f_ui);
+            btn_api = create_tb_btn(hwnd, cs.hInstance, "", ID_BTN_API, f_ui);
+            btn_open_logs = create_tb_btn(hwnd, cs.hInstance, "", ID_BTN_OPEN_LOGS, f_ui);
+            btn_settings = create_tb_btn(hwnd, cs.hInstance, "", ID_BTN_SETTINGS, f_ui);
         }
 
         let pane_count = if params.dedicated { 1 } else { 4 };
@@ -475,30 +376,35 @@ unsafe extern "system" fn monitor_wnd_proc(
             panes.push(ph);
         }
 
-        let state = Box::new(MonitorWindowState {
+        let mut state = Box::new(MonitorWindowState {
             hwnd,
             hinst: cs.hInstance,
             is_primary: params.is_primary,
             dedicated: params.dedicated,
             manager: params.manager,
             theme,
-            api_port: params.api_port.unwrap_or(DEFAULT_API_PORT),
+            active_api_port: params.api_port,
+            api_copied_flash: false,
             layout: params.layout,
             split_x: params.split_x,
             split_y: params.split_y,
             drag_axis: DragAxis::None,
             panes,
-            tooltip_hwnd,
+            tooltip_hwnd: null_mut(),
             btn_1x1,
             btn_1x2,
             btn_2x1,
             btn_2x2,
             btn_new_win,
             btn_refresh,
-            cmb_notify,
-            lbl_api,
+            btn_api,
             btn_open_logs,
+            btn_settings,
         });
+
+        state.apply_dark_styles();
+        state.apply_toolbar_labels();
+        state.rebuild_tooltips();
 
         let ptr = Box::into_raw(state);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
@@ -516,6 +422,19 @@ unsafe extern "system" fn monitor_wnd_proc(
     let state = &mut *ptr;
 
     match msg {
+        WM_ERASEBKGND => {
+            let hdc = wparam as HDC;
+            let mut rc: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rc);
+            FillRect(hdc, &rc, state.theme.brush_bg);
+            1
+        }
+        WM_CTLCOLORBTN | WM_CTLCOLORSTATIC => {
+            let hdc = wparam as HDC;
+            SetTextColor(hdc, state.theme.col_fg);
+            SetBkColor(hdc, state.theme.col_bg);
+            state.theme.brush_bg as LRESULT
+        }
         WM_SIZE => {
             state.update_layout();
             0
@@ -596,7 +515,6 @@ unsafe extern "system" fn monitor_wnd_proc(
         }
         WM_COMMAND => {
             let id = (wparam & 0xFFFF) as isize;
-            let notif = ((wparam >> 16) & 0xFFFF) as u32;
             match id {
                 ID_BTN_1X1 => state.set_layout_and_reset_split(LayoutMode::Grid1x1),
                 ID_BTN_1X2 => state.set_layout_and_reset_split(LayoutMode::Grid1x2),
@@ -609,28 +527,53 @@ unsafe extern "system" fn monitor_wnd_proc(
                 ID_BTN_REFRESH => {
                     refresh_all_windows_ports(&state.manager, state.hinst, false);
                 }
-                ID_CMB_NOTIFY if notif == CBN_SELCHANGE => {
-                    let idx = SendMessageW(state.cmb_notify, CB_GETCURSEL, 0, 0);
-                    let mode = match idx {
-                        0 => NotifyMode::Off,
-                        2 => NotifyMode::Windows,
-                        3 => NotifyMode::Both,
-                        _ => NotifyMode::InApp,
-                    };
-                    GLOBAL_NOTIFY_MODE.with(|m| *m.borrow_mut() = mode);
-                    save_all_windows_config();
+                ID_BTN_API => {
+                    if let Some(p) = state.active_api_port {
+                        let url = format!("http://127.0.0.1:{}", p);
+                        if copy_text_to_clipboard(hwnd, &url) {
+                            state.api_copied_flash = true;
+                            state.update_api_button_text();
+                            SetTimer(hwnd, TIMER_API_COPIED_ID, 2000, None);
+                        }
+                    }
                 }
                 ID_BTN_OPEN_LOGS => {
                     let dir = to_wide(&state.manager.log_dir().to_string_lossy());
                     let op = to_wide("open");
                     ShellExecuteW(hwnd, op.as_ptr(), dir.as_ptr(), null(), null(), SW_SHOW);
                 }
+                ID_BTN_SETTINGS => {
+                    let owner = PRIMARY_HWND.with(|p| *p.borrow());
+                    let target_owner = if !owner.is_null() && IsWindow(owner) != 0 {
+                        owner
+                    } else {
+                        hwnd
+                    };
+                    let values = SettingsValues {
+                        lang: lang(),
+                        theme_mode: GLOBAL_THEME_MODE.with(|t| *t.borrow()),
+                        notify_mode: GLOBAL_NOTIFY_MODE.with(|m| *m.borrow()),
+                        api_port: CONFIGURED_API_PORT.with(|p| *p.borrow()),
+                    };
+                    open_settings_dialog(target_owner, state.hinst, values);
+                }
                 _ => {}
             }
             0
         }
+        WM_SETTINGS_CHANGED => {
+            let dlg_hwnd = wparam as HWND;
+            if let Some(vals) = settings_get_values(dlg_hwnd) {
+                set_lang(vals.lang);
+                GLOBAL_THEME_MODE.with(|t| *t.borrow_mut() = vals.theme_mode);
+                GLOBAL_NOTIFY_MODE.with(|m| *m.borrow_mut() = vals.notify_mode);
+                CONFIGURED_API_PORT.with(|p| *p.borrow_mut() = vals.api_port);
+                apply_global_theme_and_lang();
+                save_all_windows_config();
+            }
+            0
+        }
         WM_PANE_POPOUT => {
-            // 「別窓」 opens a dedicated single-COM-port window (no split controls!)
             let pane_hwnd = wparam as HWND;
             if let Some(cfg) = pane_get_config(pane_hwnd) {
                 state.open_dedicated_port_window(cfg);
@@ -650,6 +593,10 @@ unsafe extern "system" fn monitor_wnd_proc(
         WM_TIMER => {
             if wparam == TIMER_REFRESH_ID {
                 refresh_all_windows_ports(&state.manager, state.hinst, true);
+            } else if wparam == TIMER_API_COPIED_ID {
+                KillTimer(hwnd, TIMER_API_COPIED_ID);
+                state.api_copied_flash = false;
+                state.update_api_button_text();
             }
             0
         }
@@ -682,6 +629,7 @@ unsafe extern "system" fn monitor_wnd_proc(
                     TRAY_READY.with(|t| *t.borrow_mut() = false);
                 }
             }
+            KillTimer(hwnd, TIMER_API_COPIED_ID);
             if !state.tooltip_hwnd.is_null() {
                 DestroyWindow(state.tooltip_hwnd);
                 state.tooltip_hwnd = null_mut();
@@ -706,20 +654,190 @@ unsafe extern "system" fn monitor_wnd_proc(
 }
 
 impl MonitorWindowState {
+    unsafe fn apply_dark_styles(&self) {
+        let dark = self.theme.dark;
+        apply_window_dark_titlebar(self.hwnd, dark);
+        if !self.dedicated {
+            for btn in [
+                self.btn_1x1,
+                self.btn_1x2,
+                self.btn_2x1,
+                self.btn_2x2,
+                self.btn_new_win,
+                self.btn_refresh,
+                self.btn_api,
+                self.btn_open_logs,
+                self.btn_settings,
+            ] {
+                apply_ctrl_dark_mode(btn, dark, CtrlThemeKind::Button);
+            }
+        }
+    }
+
+    unsafe fn update_api_button_text(&self) {
+        if self.btn_api.is_null() {
+            return;
+        }
+        let text = if self.api_copied_flash {
+            tr("✓ Copied API URL!", "✓ URLをコピーしました!").to_string()
+        } else if let Some(p) = self.active_api_port {
+            format!("Agent API: 127.0.0.1:{}", p)
+        } else {
+            tr("Agent API: Off", "Agent API: 停止").to_string()
+        };
+        set_window_text(self.btn_api, &text);
+    }
+
+    unsafe fn apply_toolbar_labels(&self) {
+        if self.dedicated {
+            return;
+        }
+        set_window_text(
+            self.btn_1x1,
+            if self.layout == LayoutMode::Grid1x1 {
+                tr("[1 Pane]", "[1画面]")
+            } else {
+                tr("1 Pane", "1画面")
+            },
+        );
+        set_window_text(
+            self.btn_1x2,
+            if self.layout == LayoutMode::Grid1x2 {
+                tr("[2H]", "[2画面横]")
+            } else {
+                tr("2H", "2画面横")
+            },
+        );
+        set_window_text(
+            self.btn_2x1,
+            if self.layout == LayoutMode::Grid2x1 {
+                tr("[2V]", "[2画面縦]")
+            } else {
+                tr("2V", "2画面縦")
+            },
+        );
+        set_window_text(
+            self.btn_2x2,
+            if self.layout == LayoutMode::Grid2x2 {
+                tr("[4 Panes]", "[4画面]")
+            } else {
+                tr("4 Panes", "4画面")
+            },
+        );
+        set_window_text(self.btn_new_win, tr("+ New Window", "+ 別ウィンドウ"));
+        set_window_text(self.btn_refresh, tr("Refresh", "ポート再検索"));
+        set_window_text(self.btn_open_logs, tr("Logs", "ログフォルダ"));
+        set_window_text(self.btn_settings, tr("Settings", "設定"));
+        self.update_api_button_text();
+    }
+
+    unsafe fn rebuild_tooltips(&mut self) {
+        if self.dedicated {
+            return;
+        }
+        if !self.tooltip_hwnd.is_null() {
+            DestroyWindow(self.tooltip_hwnd);
+        }
+        let tip = create_tooltip_window(self.hwnd, self.hinst);
+        self.tooltip_hwnd = tip;
+        let hwnd = self.hwnd;
+
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_1x1,
+            tr(
+                "Switch to single-pane layout (resets split ratios)",
+                "1 画面表示に切り替えます（分割比率もリセット）",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_1x2,
+            tr(
+                "Horizontal 2-pane split. Drag divider to resize; click again to reset.",
+                "左右 2 画面表示に切り替えます\n境界ドラッグでサイズ変更でき、再度押すと均等幅にリセットされます",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_2x1,
+            tr(
+                "Vertical 2-pane split. Drag divider to resize; click again to reset.",
+                "上下 2 画面表示に切り替えます\n境界ドラッグでサイズ変更でき、再度押すと均等高さにリセットされます",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_2x2,
+            tr(
+                "2×2 4-pane grid. Drag dividers or center intersection to resize; click again to reset.",
+                "2×2 の 4 画面表示に切り替えます\n境界や中央交点のドラッグでサイズ変更でき、再度押すと均等にリセットされます",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_new_win,
+            tr(
+                "Open a new multi-pane window",
+                "複数画面分割に対応した新しいウィンドウを開きます",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_refresh,
+            tr(
+                "Rescan active COM ports and hardware names",
+                "アクティブな COM ポートとハードウェア名を手動で再スキャンします",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_api,
+            tr(
+                "Click to copy the local Agent HTTP/SSE API URL for Antigravity / Codex / scripts",
+                "クリックすると Agent API の URL をクリップボードへコピーします（Antigravity / Codex / スクリプト連携用）",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_open_logs,
+            tr(
+                "Open the logs/ folder containing live date-stamped serial log files",
+                "日付付きリアルタイムログファイルが保存されている logs フォルダを開きます",
+            ),
+        );
+        add_tooltip(
+            tip,
+            hwnd,
+            self.btn_settings,
+            tr(
+                "Open Settings (Language, Dark/Light Theme, New Device Alerts, API Port)",
+                "設定画面を開きます（言語・ダーク/ライトテーマ・新デバイス通知・API ポート）",
+            ),
+        );
+    }
+
     unsafe fn set_layout_and_reset_split(&mut self, layout: LayoutMode) {
         self.layout = layout;
-        // Clicking the layout button always resets dragged splitter ratios back to 50% / 50%!
         self.split_x = 0.5;
         self.split_y = 0.5;
+        self.apply_toolbar_labels();
         self.update_layout();
         self.update_title();
         InvalidateRect(self.hwnd, null(), 1);
         save_all_windows_config();
     }
 
-    unsafe fn handle_dpi_changed(&mut self, new_dpi: u32, suggested: &RECT) {
-        let dpi = if new_dpi == 0 { 96 } else { new_dpi };
-        let new_theme = Arc::new(UiTheme::new(dpi));
+    unsafe fn apply_new_theme(&mut self, dpi: u32, dark: bool) {
+        let new_theme = Arc::new(UiTheme::new(dpi, dark));
         let f_ui = new_theme.font_ui as WPARAM;
 
         if !self.dedicated {
@@ -730,9 +848,9 @@ impl MonitorWindowState {
                 self.btn_2x2,
                 self.btn_new_win,
                 self.btn_refresh,
-                self.cmb_notify,
-                self.lbl_api,
+                self.btn_api,
                 self.btn_open_logs,
+                self.btn_settings,
             ] {
                 if !ctrl.is_null() {
                     SendMessageW(ctrl, WM_SETFONT, f_ui, 1);
@@ -741,9 +859,18 @@ impl MonitorWindowState {
         }
 
         self.theme = Arc::clone(&new_theme);
+        self.apply_dark_styles();
         for &ph in &self.panes {
             pane_apply_theme(ph, Arc::clone(&new_theme));
         }
+        self.update_layout();
+        InvalidateRect(self.hwnd, null(), 1);
+    }
+
+    unsafe fn handle_dpi_changed(&mut self, new_dpi: u32, suggested: &RECT) {
+        let dpi = if new_dpi == 0 { 96 } else { new_dpi };
+        let dark = self.theme.dark;
+        self.apply_new_theme(dpi, dark);
 
         SetWindowPos(
             self.hwnd,
@@ -795,7 +922,7 @@ impl MonitorWindowState {
             0.5,
             0.5,
             panes,
-            Some(self.api_port),
+            self.active_api_port,
         );
     }
 
@@ -820,7 +947,7 @@ impl MonitorWindowState {
             0.5,
             0.5,
             panes,
-            Some(self.api_port),
+            self.active_api_port,
         );
     }
 
@@ -940,8 +1067,8 @@ impl MonitorWindowState {
         }
         if !self.dedicated && self.layout != LayoutMode::Grid1x1 {
             let m = self.compute_grid_metrics();
-            let bg = CreateSolidBrush(rgb(232, 235, 240));
-            let grip = CreateSolidBrush(rgb(165, 173, 184));
+            let bg = self.theme.brush_splitter_bg;
+            let grip = self.theme.brush_splitter_grip;
             let s = |v: i32| dpi_scale(v, self.theme.dpi);
 
             if matches!(self.layout, LayoutMode::Grid1x2 | LayoutMode::Grid2x2) {
@@ -980,9 +1107,6 @@ impl MonitorWindowState {
                 };
                 FillRect(hdc, &grc, grip);
             }
-
-            DeleteObject(bg);
-            DeleteObject(grip);
         }
         EndPaint(self.hwnd, &ps);
     }
@@ -1004,76 +1128,44 @@ impl MonitorWindowState {
 
         let pad = s(5);
         let tb_h = s(24);
-        let drop_h = s(180);
         let y = pad;
-
-        set_window_text(
-            self.btn_1x1,
-            if self.layout == LayoutMode::Grid1x1 {
-                "[1画面]"
-            } else {
-                "1画面"
-            },
-        );
-        set_window_text(
-            self.btn_1x2,
-            if self.layout == LayoutMode::Grid1x2 {
-                "[2画面横]"
-            } else {
-                "2画面横"
-            },
-        );
-        set_window_text(
-            self.btn_2x1,
-            if self.layout == LayoutMode::Grid2x1 {
-                "[2画面縦]"
-            } else {
-                "2画面縦"
-            },
-        );
-        set_window_text(
-            self.btn_2x2,
-            if self.layout == LayoutMode::Grid2x2 {
-                "[4画面]"
-            } else {
-                "4画面"
-            },
-        );
 
         let mut x = pad;
         let place = |btn: HWND, x: &mut i32, bw: i32| {
             MoveWindow(btn, *x, y, bw, tb_h, 1);
             *x += bw + s(4);
         };
-        place(self.btn_1x1, &mut x, s(62));
-        place(self.btn_1x2, &mut x, s(76));
-        place(self.btn_2x1, &mut x, s(76));
-        place(self.btn_2x2, &mut x, s(62));
+        place(self.btn_1x1, &mut x, s(66));
+        place(self.btn_1x2, &mut x, s(74));
+        place(self.btn_2x1, &mut x, s(74));
+        place(self.btn_2x2, &mut x, s(70));
         x += s(5);
-        place(self.btn_new_win, &mut x, s(106));
-        place(self.btn_refresh, &mut x, s(94));
+        place(self.btn_new_win, &mut x, s(108));
+        place(self.btn_refresh, &mut x, s(90));
 
-        if !self.cmb_notify.is_null() {
-            x += s(4);
-            let nw = s(106);
-            MoveWindow(self.cmb_notify, x, y, nw, drop_h, 1);
-            x += nw + s(4);
-        }
+        // Right-aligned buttons: [Agent API: 127.0.0.1:27182] [Logs] [Settings]
+        let set_w = s(68);
+        let log_w = s(82);
+        let api_w = s(178);
 
-        let open_w = s(86);
-        let open_x = (w - pad - open_w).max(x + s(6));
-        MoveWindow(self.btn_open_logs, open_x, y, open_w, tb_h, 1);
+        let set_x = (w - pad - set_w).max(x + s(6));
+        let log_x = set_x - s(4) - log_w;
+        let api_x = log_x - s(4) - api_w;
 
-        let api_x = x + s(6);
-        let api_w = open_x - s(8) - api_x;
-        if api_w >= s(130) {
-            ShowWindow(self.lbl_api, SW_SHOW);
-            MoveWindow(self.lbl_api, api_x, y, api_w, tb_h, 1);
+        MoveWindow(self.btn_settings, set_x, y, set_w, tb_h, 1);
+        if log_x >= x + s(4) {
+            ShowWindow(self.btn_open_logs, SW_SHOW);
+            MoveWindow(self.btn_open_logs, log_x, y, log_w, tb_h, 1);
         } else {
-            ShowWindow(self.lbl_api, SW_HIDE);
+            ShowWindow(self.btn_open_logs, SW_HIDE);
+        }
+        if api_x >= x + s(4) {
+            ShowWindow(self.btn_api, SW_SHOW);
+            MoveWindow(self.btn_api, api_x, y, api_w, tb_h, 1);
+        } else {
+            ShowWindow(self.btn_api, SW_HIDE);
         }
 
-        // Layout grid area using dynamic split_x / split_y
         let m = self.compute_grid_metrics();
         let vis_count = self.layout.pane_count();
         for (i, &ph) in self.panes.iter().enumerate() {
@@ -1132,6 +1224,30 @@ impl MonitorWindowState {
     }
 }
 
+unsafe fn apply_global_theme_and_lang() {
+    let dark = resolve_is_dark(GLOBAL_THEME_MODE.with(|t| *t.borrow()));
+    let wins: Vec<HWND> = OPEN_WINDOWS.with(|list| list.borrow().clone());
+    for wh in wins {
+        if IsWindow(wh) != 0 {
+            let ptr = GetWindowLongPtrW(wh, GWLP_USERDATA) as *mut MonitorWindowState;
+            if !ptr.is_null() {
+                let st = &mut *ptr;
+                let dpi = st.theme.dpi;
+                if st.theme.dark != dark {
+                    st.apply_new_theme(dpi, dark);
+                }
+                st.apply_toolbar_labels();
+                st.rebuild_tooltips();
+                st.update_title();
+                for &ph in &st.panes {
+                    pane_apply_language(ph);
+                }
+                InvalidateRect(wh, null(), 1);
+            }
+        }
+    }
+}
+
 unsafe fn refresh_all_windows_ports(
     manager: &Arc<MonitorManager>,
     hinst: HINSTANCE,
@@ -1180,7 +1296,7 @@ unsafe fn collect_all_used_ports() -> Vec<String> {
 
 unsafe fn save_all_windows_config() {
     let wins: Vec<HWND> = OPEN_WINDOWS.with(|list| list.borrow().clone());
-    let mut primary_cfg: Option<(u16, WindowStateConfig)> = None;
+    let mut primary_cfg: Option<WindowStateConfig> = None;
     let mut extras: Vec<WindowStateConfig> = Vec::new();
 
     for wh in wins {
@@ -1190,7 +1306,7 @@ unsafe fn save_all_windows_config() {
                 let st = &*ptr;
                 let snap = st.capture_state();
                 if st.is_primary && primary_cfg.is_none() {
-                    primary_cfg = Some((st.api_port, snap));
+                    primary_cfg = Some(snap);
                 } else {
                     extras.push(snap);
                 }
@@ -1198,11 +1314,12 @@ unsafe fn save_all_windows_config() {
         }
     }
 
-    if let Some((api_port, main)) = primary_cfg {
-        let notify_mode = GLOBAL_NOTIFY_MODE.with(|m| *m.borrow());
+    if let Some(main) = primary_cfg {
         let cfg = AppConfig {
-            api_port,
-            notify_mode,
+            api_port: CONFIGURED_API_PORT.with(|p| *p.borrow()),
+            lang: lang(),
+            theme_mode: GLOBAL_THEME_MODE.with(|t| *t.borrow()),
+            notify_mode: GLOBAL_NOTIFY_MODE.with(|m| *m.borrow()),
             main_rect: main.rect,
             layout: main.layout,
             main_split_x: main.split_x,

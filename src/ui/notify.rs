@@ -1,3 +1,4 @@
+use crate::i18n::tr;
 use crate::types::{NotifyMode, PortInfo};
 use crate::ui::{dpi_scale, rgb, to_wide, window_dpi, IDI_APP_ICON};
 use std::ptr::{null, null_mut};
@@ -90,9 +91,12 @@ pub unsafe fn notify_new_devices(
     }
 
     let title = if new_ports.len() == 1 {
-        "新しいシリアルデバイスを検出".to_string()
+        tr("New serial device detected", "新しいシリアルデバイスを検出").to_string()
     } else {
-        format!("新しいシリアルデバイスを {} 件検出", new_ports.len())
+        match crate::i18n::lang() {
+            crate::i18n::Lang::En => format!("{} new serial devices detected", new_ports.len()),
+            crate::i18n::Lang::Ja => format!("新しいシリアルデバイスを {} 件検出", new_ports.len()),
+        }
     };
     let body = new_ports
         .iter()
