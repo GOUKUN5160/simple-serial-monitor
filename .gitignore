@@ -1,0 +1,8 @@
+/target/
+/dist/
+/logs/
+ssm_config.json
+*.res
+*.log
+.DS_Store
+Thumbs.db
