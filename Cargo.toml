@@ -2,7 +2,7 @@
 name = "simple-serial-monitor"
 version = "0.1.1"
 edition = "2021"
-description = "Ultra-lightweight native Windows serial monitor for ESP32, Raspberry Pi, and Arduino with multi-port views and coding-agent interface"
+description = "Ultra-lightweight native Windows/macOS serial monitor for ESP32, Raspberry Pi, and Arduino with multi-port views and coding-agent interface"
 
 [[bin]]
 name = "ssm"
@@ -12,7 +12,7 @@ path = "src/main.rs"
 name = "ssm-cli"
 path = "src/bin/ssm_cli.rs"
 
-[dependencies]
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Devices_Communication",

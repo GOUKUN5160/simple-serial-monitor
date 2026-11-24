@@ -295,7 +295,7 @@ fn handle_client(mut stream: TcpStream, manager: Arc<MonitorManager>) {
         }
 
         if let Some(rest) = path.strip_prefix("/api/ports/") {
-            if let Some((port_raw, action)) = rest.split_once('/') {
+            if let Some((port_raw, action)) = rest.rsplit_once('/') {
                 let port = normalize_port(&url_decode(port_raw));
                 let result = match action {
                     "connect" => {

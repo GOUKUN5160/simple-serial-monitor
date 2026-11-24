@@ -281,7 +281,24 @@ impl MonitorManager {
 }
 
 pub fn normalize_port(name: &str) -> String {
-    name.trim()
-        .trim_start_matches("\\\\.\\")
-        .to_ascii_uppercase()
+    #[cfg(windows)]
+    {
+        name.trim()
+            .trim_start_matches("\\\\.\\")
+            .to_ascii_uppercase()
+    }
+    #[cfg(not(windows))]
+    {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+        if trimmed.starts_with('/') {
+            trimmed.to_string()
+        } else if trimmed.starts_with("cu.") || trimmed.starts_with("tty.") || trimmed.starts_with("tty") {
+            format!("/dev/{}", trimmed)
+        } else {
+            trimmed.to_string()
+        }
+    }
 }

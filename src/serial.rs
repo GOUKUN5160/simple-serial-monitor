@@ -11,27 +11,18 @@ use crate::types::{
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+#[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use windows_sys::Win32::Devices::Communication::{
-    ClearCommError, GetCommState, PurgeComm, SetCommState, SetCommTimeouts, SetupComm,
-    COMMTIMEOUTS, COMSTAT, DCB, PURGE_RXABORT, PURGE_RXCLEAR, PURGE_TXABORT, PURGE_TXCLEAR,
-};
-use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE,
-    HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
-};
+
+#[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
-use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-use windows_sys::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
 
 const MAX_LOG_ENTRIES: usize = 8000;
 
@@ -88,7 +79,8 @@ impl PortSession {
         log_dir: PathBuf,
     ) -> Arc<Self> {
         let _ = std::fs::create_dir_all(&log_dir);
-        let safe_name = port_name.replace(['\\', '/', ':', '*'], "_");
+        let trimmed_dev = port_name.trim_start_matches("/dev/");
+        let safe_name = trimmed_dev.replace(['\\', '/', ':', '*'], "_");
         let log_file_path = log_dir.join(format!("{}.log", safe_name));
         let log_file = open_shared_log_file(&log_file_path);
 
@@ -186,15 +178,7 @@ impl PortSession {
         g.logs.clear();
         // Truncate live log file as well
         g.log_file = None;
-        if let Ok(f) = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-            .open(&g.log_file_path)
-        {
-            g.log_file = Some(f);
-        }
+        g.log_file = truncate_shared_log_file(&g.log_file_path);
         self.wake_subscribers.notify_all();
     }
 
@@ -298,220 +282,526 @@ impl PortSession {
 }
 
 fn open_shared_log_file(path: &PathBuf) -> Option<File> {
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .open(path)
-        .ok()
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(windows)]
+    {
+        opts.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    opts.open(path).ok()
 }
 
-struct WinSerialPort {
-    handle: HANDLE,
-    read_event: HANDLE,
-    write_event: HANDLE,
+fn truncate_shared_log_file(path: &PathBuf) -> Option<File> {
+    let mut opts = OpenOptions::new();
+    opts.create(true).write(true).truncate(true);
+    #[cfg(windows)]
+    {
+        opts.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    opts.open(path).ok()
 }
 
-impl WinSerialPort {
-    fn open(port_name: &str) -> Result<Self, u32> {
-        let dev_path = format!("\\\\.\\{}\0", port_name.trim_start_matches("\\\\.\\"));
-        let wide: Vec<u16> = dev_path.encode_utf16().collect();
-        unsafe {
-            let handle = CreateFileW(
-                wide.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                null(),
-                OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED,
-                null_mut(),
-            );
-            if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-                return Err(GetLastError());
-            }
+#[cfg(windows)]
+mod port_io {
+    use crate::types::{Parity, SerialConfig};
+    use std::ptr::{null, null_mut};
+    use windows_sys::Win32::Devices::Communication::{
+        ClearCommError, GetCommState, PurgeComm, SetCommState, SetCommTimeouts, SetupComm,
+        COMMTIMEOUTS, COMSTAT, DCB, PURGE_RXABORT, PURGE_RXCLEAR, PURGE_TXABORT, PURGE_TXCLEAR,
+    };
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_IO_PENDING, GENERIC_READ,
+        GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
 
-            let read_event = CreateEventW(null(), 1, 0, null());
-            let write_event = CreateEventW(null(), 1, 0, null());
-            if read_event.is_null() || write_event.is_null() {
-                if !read_event.is_null() {
-                    CloseHandle(read_event);
-                }
-                if !write_event.is_null() {
-                    CloseHandle(write_event);
-                }
-                CloseHandle(handle);
-                return Err(GetLastError());
-            }
-
-            // Configure RX/TX driver queue sizes (important for CH340/CP210x drivers)
-            SetupComm(handle, 16384, 16384);
-
-            // Standard Win32 instant-return-on-any-byte timeout configuration:
-            // Returns immediately with queued bytes if any exist, otherwise waits up to 35ms for first byte.
-            // Prevents CH340/FTDI drivers from discarding partial reads on CancelIoEx.
-            let timeouts = COMMTIMEOUTS {
-                ReadIntervalTimeout: u32::MAX,
-                ReadTotalTimeoutMultiplier: u32::MAX,
-                ReadTotalTimeoutConstant: 35,
-                WriteTotalTimeoutMultiplier: 0,
-                WriteTotalTimeoutConstant: 1000,
-            };
-            SetCommTimeouts(handle, &timeouts);
-
-            Ok(Self {
-                handle,
-                read_event,
-                write_event,
-            })
-        }
+    pub fn is_access_denied(err: u32) -> bool {
+        err == ERROR_ACCESS_DENIED
     }
 
-    fn apply_config(&self, cfg: SerialConfig, is_usb_cdc: bool) -> Result<(), u32> {
-        unsafe {
-            let mut dcb: DCB = std::mem::zeroed();
-            dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
-            if GetCommState(self.handle, &mut dcb) == 0 {
-                return Err(GetLastError());
-            }
-            dcb.BaudRate = cfg.baud;
-            dcb.ByteSize = cfg.data_bits;
-            dcb.Parity = cfg.parity.win32_val();
-            dcb.StopBits = cfg.stop_bits.win32_val();
-
-            // Clean bitfield setup:
-            // Bit 0: fBinary = 1
-            // Bit 1: fParity = (parity != None)
-            // Bits 4..5: fDtrControl (1 = ENABLE for USB CDC so Pico/Leonardo/ESP32-S3 transmit; 0 = DISABLE for bridges)
-            // Bits 12..13: fRtsControl (1 = ENABLE when DTR=ENABLE so ESP32 auto-reset stays inactive; 0 = DISABLE when DTR=DISABLE)
-            let mut flags: u32 = 1; // fBinary
-            if cfg.parity != Parity::None {
-                flags |= 1 << 1; // fParity
-            }
-            if is_usb_cdc {
-                flags |= 1 << 4; // DTR_CONTROL_ENABLE
-                flags |= 1 << 12; // RTS_CONTROL_ENABLE
-            }
-            dcb._bitfield = flags;
-
-            if SetCommState(self.handle, &dcb) == 0 {
-                return Err(GetLastError());
-            }
-            Ok(())
-        }
+    pub fn is_not_found(err: u32) -> bool {
+        err == 2 || err == 3 || err == 1167
     }
 
-    fn purge(&self) {
-        unsafe {
-            PurgeComm(
-                self.handle,
-                PURGE_RXCLEAR | PURGE_TXCLEAR | PURGE_RXABORT | PURGE_TXABORT,
-            );
-            let mut errs = 0u32;
-            let mut stat: COMSTAT = std::mem::zeroed();
-            ClearCommError(self.handle, &mut errs, &mut stat);
-        }
+    pub struct PlatformSerialPort {
+        handle: HANDLE,
+        read_event: HANDLE,
+        write_event: HANDLE,
     }
 
-    fn read_chunk(&self, buf: &mut [u8], wait_ms: u32) -> Result<(usize, u32), u32> {
-        unsafe {
-            let mut pre_errs = 0u32;
-            let mut pre_stat: COMSTAT = std::mem::zeroed();
-            if ClearCommError(self.handle, &mut pre_errs, &mut pre_stat) == 0 {
-                return Err(GetLastError());
-            }
-
-            // If driver already has bytes queued, request up to cbInQue for instant synchronous completion
-            let req_len = if pre_stat.cbInQue > 0 {
-                (pre_stat.cbInQue as usize).min(buf.len()) as u32
-            } else {
-                buf.len().min(512) as u32
-            };
-
-            ResetEvent(self.read_event);
-            let mut ov: OVERLAPPED = std::mem::zeroed();
-            ov.hEvent = self.read_event;
-            let mut bytes_read = 0u32;
-
-            let ok = ReadFile(
-                self.handle,
-                buf.as_mut_ptr(),
-                req_len,
-                &mut bytes_read,
-                &mut ov,
-            );
-            if ok == 0 {
-                let err = GetLastError();
-                if err != ERROR_IO_PENDING {
-                    return Err(err);
-                }
-                // Wait longer than ReadTotalTimeoutConstant (35ms) so driver completes naturally
-                let wait = WaitForSingleObject(self.read_event, wait_ms.max(80));
-                if wait == WAIT_OBJECT_0 {
-                    if GetOverlappedResult(self.handle, &ov, &mut bytes_read, 0) == 0 {
-                        return Err(GetLastError());
-                    }
-                } else {
-                    CancelIoEx(self.handle, &ov);
-                    let mut tmp = 0u32;
-                    let _ = GetOverlappedResult(self.handle, &ov, &mut tmp, 1);
-                    bytes_read = tmp;
-                }
-            }
-
-            let mut comm_errs = 0u32;
-            let mut stat: COMSTAT = std::mem::zeroed();
-            if ClearCommError(self.handle, &mut comm_errs, &mut stat) == 0 {
-                return Err(GetLastError());
-            }
-            Ok((bytes_read as usize, pre_errs | comm_errs))
-        }
-    }
-
-    fn write_all(&self, data: &[u8]) -> Result<(), u32> {
-        if data.is_empty() {
-            return Ok(());
-        }
-        unsafe {
-            ResetEvent(self.write_event);
-            let mut ov: OVERLAPPED = std::mem::zeroed();
-            ov.hEvent = self.write_event;
-            let mut written = 0u32;
-            let ok = WriteFile(
-                self.handle,
-                data.as_ptr(),
-                data.len() as u32,
-                &mut written,
-                &mut ov,
-            );
-            if ok == 0 {
-                let err = GetLastError();
-                if err != ERROR_IO_PENDING {
-                    return Err(err);
-                }
-                let wait = WaitForSingleObject(self.write_event, 1500);
-                if wait != WAIT_OBJECT_0 {
-                    CancelIoEx(self.handle, &ov);
-                    return Err(1460); // ERROR_TIMEOUT
-                }
-                if GetOverlappedResult(self.handle, &ov, &mut written, 0) == 0 {
+    impl PlatformSerialPort {
+        pub fn open(port_name: &str) -> Result<Self, u32> {
+            let dev_path = format!("\\\\.\\{}\0", port_name.trim_start_matches("\\\\.\\"));
+            let wide: Vec<u16> = dev_path.encode_utf16().collect();
+            unsafe {
+                let handle = CreateFileW(
+                    wide.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_OVERLAPPED,
+                    null_mut(),
+                );
+                if handle == INVALID_HANDLE_VALUE || handle.is_null() {
                     return Err(GetLastError());
                 }
+
+                let read_event = CreateEventW(null(), 1, 0, null());
+                let write_event = CreateEventW(null(), 1, 0, null());
+                if read_event.is_null() || write_event.is_null() {
+                    if !read_event.is_null() {
+                        CloseHandle(read_event);
+                    }
+                    if !write_event.is_null() {
+                        CloseHandle(write_event);
+                    }
+                    CloseHandle(handle);
+                    return Err(GetLastError());
+                }
+
+                SetupComm(handle, 16384, 16384);
+
+                let timeouts = COMMTIMEOUTS {
+                    ReadIntervalTimeout: u32::MAX,
+                    ReadTotalTimeoutMultiplier: u32::MAX,
+                    ReadTotalTimeoutConstant: 35,
+                    WriteTotalTimeoutMultiplier: 0,
+                    WriteTotalTimeoutConstant: 1000,
+                };
+                SetCommTimeouts(handle, &timeouts);
+
+                Ok(Self {
+                    handle,
+                    read_event,
+                    write_event,
+                })
             }
-            Ok(())
+        }
+
+        pub fn apply_config(&self, cfg: SerialConfig, is_usb_cdc: bool) -> Result<(), u32> {
+            unsafe {
+                let mut dcb: DCB = std::mem::zeroed();
+                dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
+                if GetCommState(self.handle, &mut dcb) == 0 {
+                    return Err(GetLastError());
+                }
+                dcb.BaudRate = cfg.baud;
+                dcb.ByteSize = cfg.data_bits;
+                dcb.Parity = cfg.parity.win32_val();
+                dcb.StopBits = cfg.stop_bits.win32_val();
+
+                let mut flags: u32 = 1; // fBinary
+                if cfg.parity != Parity::None {
+                    flags |= 1 << 1; // fParity
+                }
+                if is_usb_cdc {
+                    flags |= 1 << 4; // DTR_CONTROL_ENABLE
+                    flags |= 1 << 12; // RTS_CONTROL_ENABLE
+                }
+                dcb._bitfield = flags;
+
+                if SetCommState(self.handle, &dcb) == 0 {
+                    return Err(GetLastError());
+                }
+                Ok(())
+            }
+        }
+
+        pub fn purge(&self) {
+            unsafe {
+                PurgeComm(
+                    self.handle,
+                    PURGE_RXCLEAR | PURGE_TXCLEAR | PURGE_RXABORT | PURGE_TXABORT,
+                );
+                let mut errs = 0u32;
+                let mut stat: COMSTAT = std::mem::zeroed();
+                ClearCommError(self.handle, &mut errs, &mut stat);
+            }
+        }
+
+        pub fn read_chunk(&self, buf: &mut [u8], wait_ms: u32) -> Result<(usize, u32), u32> {
+            unsafe {
+                let mut pre_errs = 0u32;
+                let mut pre_stat: COMSTAT = std::mem::zeroed();
+                if ClearCommError(self.handle, &mut pre_errs, &mut pre_stat) == 0 {
+                    return Err(GetLastError());
+                }
+
+                let req_len = if pre_stat.cbInQue > 0 {
+                    (pre_stat.cbInQue as usize).min(buf.len()) as u32
+                } else {
+                    buf.len().min(512) as u32
+                };
+
+                ResetEvent(self.read_event);
+                let mut ov: OVERLAPPED = std::mem::zeroed();
+                ov.hEvent = self.read_event;
+                let mut bytes_read = 0u32;
+
+                let ok = ReadFile(
+                    self.handle,
+                    buf.as_mut_ptr(),
+                    req_len,
+                    &mut bytes_read,
+                    &mut ov,
+                );
+                if ok == 0 {
+                    let err = GetLastError();
+                    if err != ERROR_IO_PENDING {
+                        return Err(err);
+                    }
+                    let wait = WaitForSingleObject(self.read_event, wait_ms.max(80));
+                    if wait == WAIT_OBJECT_0 {
+                        if GetOverlappedResult(self.handle, &ov, &mut bytes_read, 0) == 0 {
+                            return Err(GetLastError());
+                        }
+                    } else {
+                        CancelIoEx(self.handle, &ov);
+                        let mut tmp = 0u32;
+                        let _ = GetOverlappedResult(self.handle, &ov, &mut tmp, 1);
+                        bytes_read = tmp;
+                    }
+                }
+
+                let mut comm_errs = 0u32;
+                let mut stat: COMSTAT = std::mem::zeroed();
+                if ClearCommError(self.handle, &mut comm_errs, &mut stat) == 0 {
+                    return Err(GetLastError());
+                }
+                Ok((bytes_read as usize, pre_errs | comm_errs))
+            }
+        }
+
+        pub fn write_all(&self, data: &[u8]) -> Result<(), u32> {
+            if data.is_empty() {
+                return Ok(());
+            }
+            unsafe {
+                ResetEvent(self.write_event);
+                let mut ov: OVERLAPPED = std::mem::zeroed();
+                ov.hEvent = self.write_event;
+                let mut written = 0u32;
+                let ok = WriteFile(
+                    self.handle,
+                    data.as_ptr(),
+                    data.len() as u32,
+                    &mut written,
+                    &mut ov,
+                );
+                if ok == 0 {
+                    let err = GetLastError();
+                    if err != ERROR_IO_PENDING {
+                        return Err(err);
+                    }
+                    let wait = WaitForSingleObject(self.write_event, 1500);
+                    if wait != WAIT_OBJECT_0 {
+                        CancelIoEx(self.handle, &ov);
+                        return Err(1460); // ERROR_TIMEOUT
+                    }
+                    if GetOverlappedResult(self.handle, &ov, &mut written, 0) == 0 {
+                        return Err(GetLastError());
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for PlatformSerialPort {
+        fn drop(&mut self) {
+            unsafe {
+                CancelIoEx(self.handle, null());
+                CloseHandle(self.read_event);
+                CloseHandle(self.write_event);
+                CloseHandle(self.handle);
+            }
         }
     }
 }
 
-impl Drop for WinSerialPort {
-    fn drop(&mut self) {
-        unsafe {
-            CancelIoEx(self.handle, null());
-            CloseHandle(self.read_event);
-            CloseHandle(self.write_event);
-            CloseHandle(self.handle);
+#[cfg(target_os = "macos")]
+mod port_io {
+    use crate::types::{Parity, SerialConfig, StopBits};
+    use std::ffi::{c_char, c_int, c_ulong, c_void, CString};
+
+    const O_RDWR: c_int = 0x0002;
+    const O_NONBLOCK: c_int = 0x0004;
+    const O_NOCTTY: c_int = 0x20000;
+
+    const TCSANOW: c_int = 0;
+    const TCIOFLUSH: c_int = 3;
+
+    const CSIZE: u64 = 0x0000_0300;
+    const CS5: u64 = 0x0000_0000;
+    const CS6: u64 = 0x0000_0100;
+    const CS7: u64 = 0x0000_0200;
+    const CS8: u64 = 0x0000_0300;
+    const CSTOPB: u64 = 0x0000_0400;
+    const CREAD: u64 = 0x0000_0800;
+    const PARENB: u64 = 0x0000_1000;
+    const PARODD: u64 = 0x0000_2000;
+    const HUPCL: u64 = 0x0000_4000;
+    const CLOCAL: u64 = 0x0000_8000;
+
+    const TIOCEXCL: c_ulong = 0x2000_740d;
+    const TIOCNXCL: c_ulong = 0x2000_740e;
+    const TIOCMGET: c_ulong = 0x4004_746a;
+    const TIOCMSET: c_ulong = 0x8004_746d;
+    const TIOCM_DTR: c_int = 0x0002;
+    const TIOCM_RTS: c_int = 0x0004;
+    const IOSSIOSPEED: c_ulong = 0x8008_5402;
+
+    const POLLIN: i16 = 0x0001;
+    const POLLOUT: i16 = 0x0004;
+    const POLLERR: i16 = 0x0008;
+    const POLLHUP: i16 = 0x0010;
+    const POLLNVAL: i16 = 0x0020;
+
+    const EACCES: u32 = 13;
+    const EBUSY: u32 = 16;
+    const ENOENT: u32 = 2;
+    const ENXIO: u32 = 6;
+    const EAGAIN: i32 = 35;
+    const EINTR: i32 = 4;
+
+    #[repr(C)]
+    struct Termios {
+        c_iflag: u64,
+        c_oflag: u64,
+        c_cflag: u64,
+        c_lflag: u64,
+        c_cc: [u8; 20],
+        c_ispeed: u64,
+        c_ospeed: u64,
+    }
+
+    #[repr(C)]
+    struct PollFd {
+        fd: c_int,
+        events: i16,
+        revents: i16,
+    }
+
+    extern "C" {
+        fn open(path: *const c_char, oflag: c_int, ...) -> c_int;
+        fn close(fd: c_int) -> c_int;
+        fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+        fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+        fn poll(fds: *mut PollFd, nfds: u32, timeout: c_int) -> c_int;
+        fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+        fn tcgetattr(fd: c_int, termios_p: *mut Termios) -> c_int;
+        fn tcsetattr(fd: c_int, optional_actions: c_int, termios_p: *const Termios) -> c_int;
+        fn tcflush(fd: c_int, queue_selector: c_int) -> c_int;
+        fn cfsetspeed(termios_p: *mut Termios, speed: u64) -> c_int;
+        fn __error() -> *mut c_int;
+    }
+
+    fn last_errno() -> u32 {
+        unsafe { (*__error()).max(0) as u32 }
+    }
+
+    pub fn is_access_denied(err: u32) -> bool {
+        err == EBUSY || err == EACCES
+    }
+
+    pub fn is_not_found(err: u32) -> bool {
+        err == ENOENT || err == ENXIO
+    }
+
+    pub struct PlatformSerialPort {
+        fd: c_int,
+    }
+
+    impl PlatformSerialPort {
+        pub fn open(port_name: &str) -> Result<Self, u32> {
+            let cpath = CString::new(port_name).map_err(|_| ENOENT)?;
+            unsafe {
+                let fd = open(cpath.as_ptr(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+                if fd < 0 {
+                    return Err(last_errno());
+                }
+                // Request exclusive access so conflicts with screen / esptool / Arduino IDE are detected
+                if ioctl(fd, TIOCEXCL) < 0 {
+                    let err = last_errno();
+                    close(fd);
+                    return Err(if err == 0 { EBUSY } else { err });
+                }
+                Ok(Self { fd })
+            }
+        }
+
+        pub fn apply_config(&self, cfg: SerialConfig, is_usb_cdc: bool) -> Result<(), u32> {
+            unsafe {
+                let mut tio: Termios = std::mem::zeroed();
+                if tcgetattr(self.fd, &mut tio) != 0 {
+                    return Err(last_errno());
+                }
+
+                // Raw mode
+                tio.c_iflag = 0;
+                tio.c_oflag = 0;
+                tio.c_lflag = 0;
+                tio.c_cflag &= !(CSIZE | PARENB | PARODD | CSTOPB | HUPCL);
+                tio.c_cflag |= CREAD | CLOCAL;
+
+                tio.c_cflag |= match cfg.data_bits {
+                    5 => CS5,
+                    6 => CS6,
+                    7 => CS7,
+                    _ => CS8,
+                };
+
+                match cfg.parity {
+                    Parity::None => {}
+                    Parity::Odd => tio.c_cflag |= PARENB | PARODD,
+                    Parity::Even => tio.c_cflag |= PARENB,
+                    Parity::Mark | Parity::Space => {}
+                }
+
+                if matches!(cfg.stop_bits, StopBits::Two) {
+                    tio.c_cflag |= CSTOPB;
+                }
+
+                // Non-blocking read behavior
+                tio.c_cc[16] = 0; // VMIN
+                tio.c_cc[17] = 0; // VTIME
+
+                // Set a standard base speed first (9600), then apply exact speed via IOSSIOSPEED
+                let _ = cfsetspeed(&mut tio, 9600);
+                if tcsetattr(self.fd, TCSANOW, &tio) != 0 {
+                    return Err(last_errno());
+                }
+
+                let speed: c_ulong = cfg.baud as c_ulong;
+                if ioctl(self.fd, IOSSIOSPEED, &speed) != 0 {
+                    // Fallback: try standard cfsetspeed if driver doesn't support IOSSIOSPEED (e.g. PTY)
+                    let _ = cfsetspeed(&mut tio, cfg.baud as u64);
+                    let _ = tcsetattr(self.fd, TCSANOW, &tio);
+                }
+
+                // Configure DTR/RTS modem lines
+                let mut status: c_int = 0;
+                if ioctl(self.fd, TIOCMGET, &mut status) == 0 {
+                    if is_usb_cdc {
+                        status |= TIOCM_DTR | TIOCM_RTS;
+                    } else {
+                        status &= !(TIOCM_DTR | TIOCM_RTS);
+                    }
+                    let _ = ioctl(self.fd, TIOCMSET, &status);
+                }
+
+                Ok(())
+            }
+        }
+
+        pub fn purge(&self) {
+            unsafe {
+                let _ = tcflush(self.fd, TCIOFLUSH);
+            }
+        }
+
+        pub fn read_chunk(&self, buf: &mut [u8], wait_ms: u32) -> Result<(usize, u32), u32> {
+            unsafe {
+                let mut pfd = PollFd {
+                    fd: self.fd,
+                    events: POLLIN,
+                    revents: 0,
+                };
+                let ret = poll(&mut pfd, 1, wait_ms as c_int);
+                if ret < 0 {
+                    let err = last_errno() as i32;
+                    if err == EINTR {
+                        return Ok((0, 0));
+                    }
+                    return Err(err as u32);
+                }
+                if ret == 0 {
+                    return Ok((0, 0));
+                }
+                if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 {
+                    return Err(ENXIO);
+                }
+                if (pfd.revents & POLLIN) != 0 {
+                    let n = read(self.fd, buf.as_mut_ptr() as *mut c_void, buf.len());
+                    if n > 0 {
+                        return Ok((n as usize, 0));
+                    } else if n == 0 {
+                        // EOF on serial device indicates USB unplug / hangup
+                        return Err(ENXIO);
+                    } else {
+                        let err = last_errno() as i32;
+                        if err == EAGAIN || err == EINTR {
+                            return Ok((0, 0));
+                        }
+                        return Err(err as u32);
+                    }
+                }
+                Ok((0, 0))
+            }
+        }
+
+        pub fn write_all(&self, data: &[u8]) -> Result<(), u32> {
+            if data.is_empty() {
+                return Ok(());
+            }
+            let mut offset = 0usize;
+            while offset < data.len() {
+                unsafe {
+                    let mut pfd = PollFd {
+                        fd: self.fd,
+                        events: POLLOUT,
+                        revents: 0,
+                    };
+                    let ret = poll(&mut pfd, 1, 1500);
+                    if ret < 0 {
+                        let err = last_errno() as i32;
+                        if err == EINTR {
+                            continue;
+                        }
+                        return Err(err as u32);
+                    }
+                    if ret == 0 {
+                        return Err(60); // ETIMEDOUT
+                    }
+                    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 {
+                        return Err(ENXIO);
+                    }
+                    let n = write(
+                        self.fd,
+                        data[offset..].as_ptr() as *const c_void,
+                        data.len() - offset,
+                    );
+                    if n > 0 {
+                        offset += n as usize;
+                    } else if n < 0 {
+                        let err = last_errno() as i32;
+                        if err == EAGAIN || err == EINTR {
+                            continue;
+                        }
+                        return Err(err as u32);
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for PlatformSerialPort {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = ioctl(self.fd, TIOCNXCL);
+                close(self.fd);
+            }
         }
     }
 }
+
+use port_io::{is_access_denied, is_not_found, PlatformSerialPort};
 
 /// Detects whether a raw byte slice looks like binary/custom protocol data rather than plain text.
 fn looks_binary(raw: &[u8]) -> bool {
@@ -683,7 +973,7 @@ fn worker_loop(session: Arc<PortSession>) {
         let g = session.inner.lock().unwrap();
         !matches!(g.state, ConnectionState::Released)
     };
-    let mut port_handle: Option<WinSerialPort> = None;
+    let mut port_handle: Option<PlatformSerialPort> = None;
     let mut assembler = LineAssembler::new();
     let mut eol_detector = LineEndingDetector::default();
     let mut last_reconnect_try = Instant::now() - Duration::from_secs(10);
@@ -788,7 +1078,7 @@ fn worker_loop(session: Arc<PortSession>) {
                         if let Err(err) = p.write_all(&data) {
                             session.push_log(
                                 LogKind::SysError,
-                                format!("{} (Win32 error {})", tr("Send failed", "送信エラー"), err),
+                                format!("{} (OS error {})", tr("Send failed", "送信エラー"), err),
                             );
                         }
                     } else {
@@ -874,7 +1164,7 @@ fn worker_loop(session: Arc<PortSession>) {
             }
             last_reconnect_try = Instant::now();
 
-            match WinSerialPort::open(&session.port_name) {
+            match PlatformSerialPort::open(&session.port_name) {
                 Ok(port) => {
                     let (cfg, is_cdc) = {
                         let mut g = session.inner.lock().unwrap();
@@ -915,7 +1205,7 @@ fn worker_loop(session: Arc<PortSession>) {
                     );
                     port_handle = Some(port);
                 }
-                Err(err) if err == ERROR_ACCESS_DENIED => {
+                Err(err) if is_access_denied(err) => {
                     let existing_owner = {
                         let g = session.inner.lock().unwrap();
                         g.state.owner().cloned()
@@ -956,7 +1246,7 @@ fn worker_loop(session: Arc<PortSession>) {
                         let g = session.inner.lock().unwrap();
                         g.state.code()
                     };
-                    let reason = if err == 2 || err == 3 || err == 1167 {
+                    let reason = if is_not_found(err) {
                         tr("Device not connected (waiting)", "デバイス未接続 (再接続待機)").to_string()
                     } else {
                         format!("{} (error {})", tr("Waiting", "接続待機中"), err)
@@ -1179,7 +1469,7 @@ fn emit_rx_bytes(
 
 fn run_active_autodetect(
     session: &Arc<PortSession>,
-    port: &WinSerialPort,
+    port: &PlatformSerialPort,
     assembler: &mut LineAssembler,
     eol_detector: &mut LineEndingDetector,
     initial_sample: Option<&[u8]>,

@@ -1,8 +1,33 @@
 use simple_serial_monitor::config::DEFAULT_API_PORT;
 use simple_serial_monitor::json::{obj, parse, Json};
+use simple_serial_monitor::manager::normalize_port;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
+
+fn url_encode_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{:02X}", b);
+            }
+        }
+    }
+    out
+}
+
+fn app_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "ssm.exe"
+    } else {
+        "ssm"
+    }
+}
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -84,8 +109,8 @@ fn http_request(
 ) -> Result<(u16, String), String> {
     let mut stream = TcpStream::connect(("127.0.0.1", api_port)).map_err(|e| {
         format!(
-            "ssm.exe (127.0.0.1:{}) に接続できません: {} (先に ssm.exe を起動してください)",
-            api_port, e
+            "{} (127.0.0.1:{}) に接続できません: {} (先に {} を起動してください)",
+            app_bin_name(), api_port, e, app_bin_name()
         )
     })?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
@@ -175,7 +200,7 @@ fn cmd_list(api_port: u16, args: &[String]) -> i32 {
                                 Some(format!("owner={} (PID {})", name, pid))
                             })
                             .unwrap_or_default();
-                        println!("{:<6} | {:<13} | {:<10} | {} {}", port, state, baud, hw, owner);
+                        println!("{:<24} | {:<13} | {:<10} | {} {}", port, state, baud, hw, owner);
                     }
                     return 0;
                 }
@@ -195,7 +220,8 @@ fn cmd_read(api_port: u16, args: &[String]) -> i32 {
         eprintln!("Usage: ssm-cli read <PORT> [--tail N] [--since-seq N] [--follow] [--json]");
         return 1;
     }
-    let port = args[0].to_ascii_uppercase();
+    let port = normalize_port(&args[0]);
+    let port_enc = url_encode_segment(&port);
     let mut tail: usize = 100;
     let mut since_seq: u64 = 0;
     let mut follow = false;
@@ -225,13 +251,13 @@ fn cmd_read(api_port: u16, args: &[String]) -> i32 {
     }
 
     if follow {
-        return stream_follow(api_port, &port, since_seq, json_mode);
+        return stream_follow(api_port, &port_enc, since_seq, json_mode);
     }
 
     let fmt = if json_mode { "json" } else { "text" };
     let path = format!(
         "/api/logs/{}?tail={}&since_seq={}&format={}&auto_open=1",
-        port, tail, since_seq, fmt
+        port_enc, tail, since_seq, fmt
     );
     match http_request(api_port, "GET", &path, None) {
         Ok((_, body)) => {
@@ -309,7 +335,7 @@ fn cmd_send(api_port: u16, args: &[String]) -> i32 {
         eprintln!("Usage: ssm-cli send <PORT> <TEXT> [--eol auto|crlf|lf|cr|none]");
         return 1;
     }
-    let port = args[0].to_ascii_uppercase();
+    let port = url_encode_segment(&normalize_port(&args[0]));
     let data = &args[1];
     let mut eol = "auto";
     let mut i = 2;
@@ -344,7 +370,7 @@ fn cmd_connect(api_port: u16, args: &[String]) -> i32 {
         eprintln!("Usage: ssm-cli connect <PORT> [--baud N] [--auto]");
         return 1;
     }
-    let port = args[0].to_ascii_uppercase();
+    let port = url_encode_segment(&normalize_port(&args[0]));
     let mut fields = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -383,7 +409,7 @@ fn cmd_simple_action(api_port: u16, args: &[String], action: &str) -> i32 {
         eprintln!("Usage: ssm-cli {} <PORT>", action);
         return 1;
     }
-    let port = args[0].to_ascii_uppercase();
+    let port = url_encode_segment(&normalize_port(&args[0]));
     match http_request(
         api_port,
         "POST",
@@ -618,7 +644,7 @@ fn handle_mcp_tool(api_port: u16, name: &str, args: Option<&Json>) -> (bool, Str
         }
         "read_serial_log" => {
             let port = match args.and_then(|a| a.get("port")).and_then(|v| v.as_str()) {
-                Some(p) => p.to_ascii_uppercase(),
+                Some(p) => url_encode_segment(&normalize_port(p)),
                 None => return (true, "missing required parameter: port".into()),
             };
             let tail = args
@@ -640,7 +666,7 @@ fn handle_mcp_tool(api_port: u16, name: &str, args: Option<&Json>) -> (bool, Str
         }
         "send_serial_data" => {
             let port = match args.and_then(|a| a.get("port")).and_then(|v| v.as_str()) {
-                Some(p) => p.to_ascii_uppercase(),
+                Some(p) => url_encode_segment(&normalize_port(p)),
                 None => return (true, "missing required parameter: port".into()),
             };
             let data = args
@@ -663,7 +689,7 @@ fn handle_mcp_tool(api_port: u16, name: &str, args: Option<&Json>) -> (bool, Str
         }
         "control_serial_port" => {
             let port = match args.and_then(|a| a.get("port")).and_then(|v| v.as_str()) {
-                Some(p) => p.to_ascii_uppercase(),
+                Some(p) => url_encode_segment(&normalize_port(p)),
                 None => return (true, "missing required parameter: port".into()),
             };
             let action = match args.and_then(|a| a.get("action")).and_then(|v| v.as_str()) {

@@ -2,6 +2,7 @@ use crate::i18n::Lang;
 use crate::json::{obj, parse, Json};
 use crate::types::{LayoutMode, NotifyMode, PaneConfig, ThemeMode, WindowRect};
 use std::path::PathBuf;
+#[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
@@ -211,21 +212,48 @@ impl AppConfig {
 }
 
 pub fn portable_base_dir() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let probe = dir.join(".ssm_write_test");
-            if std::fs::write(&probe, b"").is_ok() {
-                let _ = std::fs::remove_file(&probe);
-                return dir.to_path_buf();
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            let path_str = exe.to_string_lossy();
+            let in_app_bundle = path_str.contains(".app/Contents/MacOS");
+            if !in_app_bundle {
+                if let Some(dir) = exe.parent() {
+                    let probe = dir.join(".ssm_write_test");
+                    if std::fs::write(&probe, b"").is_ok() {
+                        let _ = std::fs::remove_file(&probe);
+                        return dir.to_path_buf();
+                    }
+                }
             }
         }
+        let base = std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join("Library").join("Application Support"))
+            .unwrap_or_else(std::env::temp_dir);
+        let dir = base.join("SimpleSerialMonitor");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
     }
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("SimpleSerialMonitor");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let probe = dir.join(".ssm_write_test");
+                if std::fs::write(&probe, b"").is_ok() {
+                    let _ = std::fs::remove_file(&probe);
+                    return dir.to_path_buf();
+                }
+            }
+        }
+        let base = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let dir = base.join("SimpleSerialMonitor");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
 }
 
 pub fn config_file_path() -> PathBuf {
@@ -254,6 +282,7 @@ pub fn save_config(cfg: &AppConfig) {
     let _ = std::fs::write(path, content);
 }
 
+#[cfg(windows)]
 pub fn clamp_rect_to_screen(rect: &WindowRect) -> WindowRect {
     unsafe {
         let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -273,6 +302,17 @@ pub fn clamp_rect_to_screen(rect: &WindowRect) -> WindowRect {
             height: h,
             maximized: rect.maximized,
         }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn clamp_rect_to_screen(rect: &WindowRect) -> WindowRect {
+    WindowRect {
+        x: rect.x.clamp(-4000, 8000),
+        y: rect.y.clamp(-2000, 4000),
+        width: rect.width.clamp(420, 4096),
+        height: rect.height.clamp(300, 2560),
+        maximized: rect.maximized,
     }
 }
 

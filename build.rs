@@ -27,8 +27,12 @@ fn main() {
     println!("cargo:rerun-if-changed=app.manifest");
     println!("cargo:rerun-if-changed=app.rc");
     println!("cargo:rerun-if-changed=assets/app.ico");
+    println!("cargo:rerun-if-changed=src/ui/macos/bridge.h");
+    println!("cargo:rerun-if-changed=src/ui/macos/bridge.m");
 
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
+    if target_os == "windows" {
         // Embed Windows application manifest (Common Controls v6 + PerMonitorV2 DPI) into ssm.exe
         println!("cargo:rustc-link-arg-bin=ssm=/MANIFEST:EMBED");
         println!("cargo:rustc-link-arg-bin=ssm=/MANIFESTINPUT:app.manifest");
@@ -51,5 +55,51 @@ fn main() {
             println!("cargo:rustc-link-arg=/OPT:ICF");
             println!("cargo:rustc-link-arg=/DEBUG:NONE");
         }
+    } else if target_os == "macos" {
+        let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
+        let obj_path = out_dir.join("ssm_macos_ui.o");
+        let lib_path = out_dir.join("libssm_macos_ui.a");
+
+        let mut clang = Command::new("clang");
+        clang.args([
+            "-c",
+            "-fobjc-arc",
+            "-Oz",
+            "-Wall",
+            "-Wextra",
+            "-Wno-unused-parameter",
+            "-mmacosx-version-min=11.0",
+            "-I",
+            "src/ui/macos",
+            "src/ui/macos/bridge.m",
+            "-o",
+        ]);
+        clang.arg(&obj_path);
+
+        if let Ok(arch) = std::env::var("CARGO_CFG_TARGET_ARCH") {
+            let clang_arch = match arch.as_str() {
+                "aarch64" => "arm64",
+                "x86_64" => "x86_64",
+                other => other,
+            };
+            clang.args(["-arch", clang_arch]);
+        }
+
+        let status = clang.status().expect("failed to invoke clang for macOS UI");
+        assert!(status.success(), "clang failed to compile src/ui/macos/bridge.m");
+
+        let ar_status = Command::new("ar")
+            .arg("rcs")
+            .arg(&lib_path)
+            .arg(&obj_path)
+            .status()
+            .expect("failed to invoke ar");
+        assert!(ar_status.success(), "ar failed to archive libssm_macos_ui.a");
+
+        println!("cargo:rustc-link-search=native={}", out_dir.display());
+        println!("cargo:rustc-link-lib=static=ssm_macos_ui");
+        println!("cargo:rustc-link-lib=framework=Cocoa");
+        println!("cargo:rustc-link-lib=framework=IOKit");
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
     }
 }

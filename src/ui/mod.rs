@@ -1,44 +1,76 @@
+#[cfg(windows)]
 pub mod logview;
+#[cfg(windows)]
 pub mod notify;
+#[cfg(windows)]
 pub mod pane;
+#[cfg(windows)]
 pub mod settings;
+#[cfg(windows)]
 pub mod tooltip;
+#[cfg(windows)]
 pub mod window;
 
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(windows)]
+mod win32_ui {
+    pub use super::{logview, notify, pane, settings, tooltip, window};
+}
+
+#[cfg(windows)]
 use crate::config::{load_config, AppConfig};
+#[cfg(windows)]
 use crate::manager::MonitorManager;
+#[cfg(windows)]
 use crate::types::ThemeMode;
+#[cfg(windows)]
 use std::ffi::c_void;
+#[cfg(windows)]
 use std::ptr::{null, null_mut};
+#[cfg(windows)]
 use std::sync::Arc;
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{COLORREF, ERROR_SUCCESS, HWND};
+#[cfg(windows)]
 use windows_sys::Win32::Graphics::Gdi::{
     CreateFontW, CreateSolidBrush, DeleteObject, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
     DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FF_MODERN, FIXED_PITCH, FW_BOLD, FW_NORMAL,
     HBRUSH, HFONT, OUT_DEFAULT_PRECIS,
 };
+#[cfg(windows)]
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
+#[cfg(windows)]
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(windows)]
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+#[cfg(windows)]
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD,
 };
+#[cfg(windows)]
 use windows_sys::Win32::UI::Controls::{
     InitCommonControlsEx, ICC_STANDARD_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX,
 };
+#[cfg(windows)]
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+#[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, GetWindowTextLengthW, GetWindowTextW, SetWindowTextW,
     TranslateMessage, MSG, WM_APP,
 };
 
+#[cfg(windows)]
 pub const WM_SSM_DPI_CHANGED: u32 = WM_APP + 30;
+#[cfg(windows)]
 pub const IDI_APP_ICON: usize = 1;
 
+#[cfg(windows)]
 #[link(name = "dwmapi")]
 extern "system" {
     fn DwmSetWindowAttribute(
@@ -49,15 +81,18 @@ extern "system" {
     ) -> i32;
 }
 
+#[cfg(windows)]
 #[link(name = "uxtheme")]
 extern "system" {
     fn SetWindowTheme(hwnd: HWND, pszsubappname: *const u16, pszsubidlist: *const u16) -> i32;
 }
 
+#[cfg(windows)]
 pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
+#[cfg(windows)]
 pub unsafe fn copy_text_to_clipboard(hwnd: HWND, text: &str) -> bool {
     const CF_UNICODETEXT: u32 = 13;
     let wide = to_wide(text);
@@ -79,6 +114,7 @@ pub unsafe fn copy_text_to_clipboard(hwnd: HWND, text: &str) -> bool {
     ok
 }
 
+#[cfg(windows)]
 pub fn set_window_text(hwnd: HWND, text: &str) {
     let w = to_wide(text);
     unsafe {
@@ -86,6 +122,7 @@ pub fn set_window_text(hwnd: HWND, text: &str) {
     }
 }
 
+#[cfg(windows)]
 pub fn get_window_text(hwnd: HWND) -> String {
     unsafe {
         let len = GetWindowTextLengthW(hwnd);
@@ -98,14 +135,17 @@ pub fn get_window_text(hwnd: HWND) -> String {
     }
 }
 
+#[cfg(windows)]
 pub const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
 
+#[cfg(windows)]
 pub fn dpi_scale(val: i32, dpi: u32) -> i32 {
     ((val as i64 * dpi as i64 + 48) / 96) as i32
 }
 
+#[cfg(windows)]
 pub fn window_dpi(hwnd: HWND) -> u32 {
     let d = unsafe { GetDpiForWindow(hwnd) };
     if d == 0 {
@@ -115,6 +155,7 @@ pub fn window_dpi(hwnd: HWND) -> u32 {
     }
 }
 
+#[cfg(windows)]
 pub fn is_os_dark_mode() -> bool {
     unsafe {
         let subkey = to_wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
@@ -140,6 +181,7 @@ pub fn is_os_dark_mode() -> bool {
     }
 }
 
+#[cfg(windows)]
 pub fn resolve_is_dark(mode: ThemeMode) -> bool {
     match mode {
         ThemeMode::Dark => true,
@@ -148,6 +190,7 @@ pub fn resolve_is_dark(mode: ThemeMode) -> bool {
     }
 }
 
+#[cfg(windows)]
 pub unsafe fn apply_window_dark_titlebar(hwnd: HWND, dark: bool) {
     let val: i32 = if dark { 1 } else { 0 };
     // Attribute 20 (Win10 2004+ / Win11), fallback 19 (older Win10)
@@ -165,6 +208,7 @@ pub unsafe fn apply_window_dark_titlebar(hwnd: HWND, dark: bool) {
     );
 }
 
+#[cfg(windows)]
 #[derive(Clone, Copy)]
 pub enum CtrlThemeKind {
     Button,
@@ -174,6 +218,7 @@ pub enum CtrlThemeKind {
     Scroll,
 }
 
+#[cfg(windows)]
 pub unsafe fn apply_ctrl_dark_mode(ctrl: HWND, dark: bool, kind: CtrlThemeKind) {
     if ctrl.is_null() {
         return;
@@ -202,6 +247,7 @@ pub unsafe fn apply_ctrl_dark_mode(ctrl: HWND, dark: bool, kind: CtrlThemeKind) 
     }
 }
 
+#[cfg(windows)]
 pub struct UiTheme {
     pub dpi: u32,
     pub dark: bool,
@@ -224,6 +270,7 @@ pub struct UiTheme {
     pub brush_status_released: HBRUSH,
 }
 
+#[cfg(windows)]
 impl UiTheme {
     pub fn new(dpi: u32, dark: bool) -> Self {
         unsafe {
@@ -324,6 +371,7 @@ impl UiTheme {
     }
 }
 
+#[cfg(windows)]
 impl Drop for UiTheme {
     fn drop(&mut self) {
         unsafe {
@@ -343,13 +391,20 @@ impl Drop for UiTheme {
     }
 }
 
+#[cfg(windows)]
 pub const COLOR_STATUS_FG: COLORREF = rgb(255, 255, 255);
+#[cfg(windows)]
 pub const COLOR_STATUS_CONNECTED: COLORREF = rgb(27, 118, 56);
+#[cfg(windows)]
 pub const COLOR_STATUS_DETECTING: COLORREF = rgb(25, 103, 210);
+#[cfg(windows)]
 pub const COLOR_STATUS_OCCUPIED: COLORREF = rgb(198, 40, 40);
+#[cfg(windows)]
 pub const COLOR_STATUS_DISCONNECTED: COLORREF = rgb(176, 104, 0);
+#[cfg(windows)]
 pub const COLOR_STATUS_RELEASED: COLORREF = rgb(88, 96, 105);
 
+#[cfg(windows)]
 pub fn run_gui(manager: Arc<MonitorManager>, initial_config: AppConfig, api_port: Option<u16>) {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -360,14 +415,18 @@ pub fn run_gui(manager: Arc<MonitorManager>, initial_config: AppConfig, api_port
         InitCommonControlsEx(&icc);
 
         let hinst = GetModuleHandleW(null());
-        window::register_window_classes(hinst);
-        pane::register_pane_class(hinst);
-        logview::register_logview_class(hinst);
-        notify::register_toast_class(hinst);
-        settings::register_settings_class(hinst);
+        win32_ui::window::register_window_classes(hinst);
+        win32_ui::pane::register_pane_class(hinst);
+        win32_ui::logview::register_logview_class(hinst);
+        win32_ui::notify::register_toast_class(hinst);
+        win32_ui::settings::register_settings_class(hinst);
 
-        let _main_hwnd =
-            window::create_initial_windows(hinst, manager.clone(), initial_config, api_port);
+        let _main_hwnd = win32_ui::window::create_initial_windows(
+            hinst,
+            manager.clone(),
+            initial_config,
+            api_port,
+        );
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
@@ -378,6 +437,10 @@ pub fn run_gui(manager: Arc<MonitorManager>, initial_config: AppConfig, api_port
     manager.shutdown_all();
 }
 
+#[cfg(windows)]
 pub fn load_initial_config() -> AppConfig {
     load_config()
 }
+
+#[cfg(target_os = "macos")]
+pub use macos::{load_initial_config, run_gui};
