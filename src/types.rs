@@ -474,6 +474,7 @@ pub fn bytes_to_bin(bytes: &[u8]) -> String {
     out
 }
 
+#[cfg(windows)]
 pub fn now_ms_and_local_datetime() -> (u64, String, String) {
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -499,6 +500,51 @@ pub fn now_ms_and_local_datetime() -> (u64, String, String) {
     let datetime_str = format!(
         "{:04}-{:02}-{:02} {}",
         st.wYear, st.wMonth, st.wDay, time_str
+    );
+    (ms, datetime_str, time_str)
+}
+
+#[cfg(unix)]
+pub fn now_ms_and_local_datetime() -> (u64, String, String) {
+    #[repr(C)]
+    struct Tm {
+        tm_sec: i32,
+        tm_min: i32,
+        tm_hour: i32,
+        tm_mday: i32,
+        tm_mon: i32,
+        tm_year: i32,
+        tm_wday: i32,
+        tm_yday: i32,
+        tm_isdst: i32,
+        tm_gmtoff: isize,
+        tm_zone: *const i8,
+    }
+    extern "C" {
+        fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+    }
+
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs() as i64;
+    let millis = dur.subsec_millis();
+    let ms = dur.as_millis() as u64;
+
+    let mut tm: Tm = unsafe { std::mem::zeroed() };
+    unsafe {
+        localtime_r(&secs, &mut tm);
+    }
+    let time_str = format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        tm.tm_hour, tm.tm_min, tm.tm_sec, millis
+    );
+    let datetime_str = format!(
+        "{:04}-{:02}-{:02} {}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        time_str
     );
     (ms, datetime_str, time_str)
 }

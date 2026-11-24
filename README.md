@@ -122,6 +122,8 @@ Date-stamped UTF-8 logs (`[YYYY-MM-DD HH:MM:SS.mmm]`) are flushed in real time t
 
 ## Building from Source
 
+### Windows
+
 Requires Rust (`x86_64-pc-windows-msvc`) on Windows:
 
 ```powershell
@@ -133,6 +135,23 @@ To build the portable ZIP archive:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\package_portable.ps1
 ```
+
+### macOS
+
+Requires Rust and Xcode Command Line Tools (`clang`) on macOS 11+ (Apple Silicon or Intel). Uses native AppKit / IOKit / CoreFoundation directly with zero external Rust crate dependencies for minimal bundle size:
+
+```bash
+cargo build --release
+```
+
+To build the `.app` bundle and ZIP archive:
+
+```bash
+chmod +x ./package_macos.sh
+./package_macos.sh
+```
+
+When launched from the `.app` bundle on macOS, configuration (`ssm_config.json`) and logs (`logs/`) are stored in `~/Library/Application Support/SimpleSerialMonitor/`. The CLI / MCP server is located at `Simple Serial Monitor.app/Contents/MacOS/ssm-cli`.
 
 ---
 

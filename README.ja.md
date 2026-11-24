@@ -118,6 +118,8 @@ Electron・WebView2・.NET・VC++ 再頒布可能パッケージなどの外部�
 
 ## ソースからのビルド
 
+### Windows
+
 Windows 上の Rust (`x86_64-pc-windows-msvc`) が必要です。
 
 ```powershell
@@ -129,6 +131,23 @@ cargo build --release
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\package_portable.ps1
 ```
+
+### macOS
+
+macOS 11+ (Apple Silicon / Intel) 上の Rust および Xcode Command Line Tools (`clang`) が必要です。外部 GUI クレートに依存せず、ネイティブ AppKit / IOKit / CoreFoundation を直接リンクして超軽量バイナリを生成します。
+
+```bash
+cargo build --release
+```
+
+`.app` バンドルおよび配布用 ZIP を作成する場合:
+
+```bash
+chmod +x ./package_macos.sh
+./package_macos.sh
+```
+
+macOS で `.app` バンドルから起動した場合、設定 (`ssm_config.json`) とログ (`logs/`) は `~/Library/Application Support/SimpleSerialMonitor/` に保存されます。CLI / MCP サーバーは `Simple Serial Monitor.app/Contents/MacOS/ssm-cli` から実行できます。
 
 ---
 
